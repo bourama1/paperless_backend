@@ -1,5 +1,4 @@
 import { open, Database } from 'sqlite';
-import sqlite3 from 'sqlite3';
 import path from 'path';
 import dotenv from 'dotenv';
 import fs from 'fs';
@@ -11,6 +10,7 @@ let db: Database | null = null;
 export const getDb = async () => {
   if (db) return db;
 
+  const sqlite3 = require('sqlite3');
   const dbPath = process.env.DATABASE_URL || './data/database.sqlite';
   const dbDir = path.dirname(dbPath);
   

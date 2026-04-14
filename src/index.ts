@@ -27,11 +27,18 @@ const io = new Server(httpServer, {
 const PORT = process.env.PORT || 3000;
 
 // Initialize Database
-getDb().then(() => {
-  console.log('Database initialized successfully');
-}).catch((error) => {
-  console.error('Failed to initialize database:', error);
-});
+const initDb = async () => {
+  try {
+    await getDb();
+    console.log('Database initialized successfully');
+  } catch (error) {
+    console.error('Failed to initialize database:', error);
+  }
+};
+
+if (process.env.NODE_ENV !== 'test') {
+  initDb();
+}
 
 // Middleware
 app.use(cors());
@@ -68,8 +75,10 @@ io.on('connection', (socket) => {
 });
 
 // Start server
-httpServer.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (process.env.NODE_ENV !== 'test') {
+  httpServer.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
 
 export { io };
