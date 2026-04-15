@@ -10,6 +10,7 @@ let db: Database | null = null;
 export const getDb = async () => {
   if (db) return db;
 
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   const sqlite3 = require('sqlite3');
   const dbPath = process.env.DATABASE_URL || './data/database.sqlite';
   const dbDir = path.dirname(dbPath);

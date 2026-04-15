@@ -12,6 +12,7 @@ describe('Queue Controller', () => {
   let mockResponse: Partial<Response>;
   let mockJson: jest.Mock;
   let mockStatus: jest.Mock;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockDb: any;
 
   beforeEach(() => {

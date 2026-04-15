@@ -1,7 +1,5 @@
 import request from 'supertest';
 import express from 'express';
-import { createServer } from 'http';
-import { Server as SocketIOServer } from 'socket.io';
 import { getDb } from '../../config/database';
 import queueRoutes from '../../routes/queue';
 
@@ -11,6 +9,7 @@ jest.mock('../../services/notificationService');
 
 describe('API Integration Tests', () => {
   let app: express.Express;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let mockDb: any;
 
   beforeEach(() => {
