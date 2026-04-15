@@ -5,10 +5,20 @@ import { notifyNewItem, notifyQueueUpdate } from '../services/notificationServic
 export const getQueue = async (req: Request, res: Response) => {
   try {
     const db = await getDb();
-    const queue = await db.all('SELECT * FROM queue WHERE status != "completed" ORDER BY created_at ASC');
-    res.json(queue);
+    const documents = await db.all('SELECT * FROM documents ORDER BY updated_at DESC');
+    
+    // Fetch revisions for each document
+    const result = await Promise.all(documents.map(async (doc) => {
+      const revisions = await db.all(
+        'SELECT * FROM revisions WHERE document_id = ? ORDER BY version DESC',
+        doc.id
+      );
+      return { ...doc, revisions };
+    }));
+
+    res.json(result);
   } catch (error) {
-    console.error('Error fetching queue:', error);
+    console.error('Error fetching documents:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
@@ -21,40 +31,32 @@ export const addToQueue = async (req: Request, res: Response) => {
 
   try {
     const db = await getDb();
-    const result = await db.run(
-      'INSERT INTO queue (filename, status) VALUES (?, ?)',
-      [filename, 'pending']
+    // Create the document
+    const docResult = await db.run(
+      'INSERT INTO documents (name) VALUES (?)',
+      [filename]
     );
-    const newItem = await db.get('SELECT * FROM queue WHERE id = ?', result.lastID);
+    const docId = docResult.lastID;
+
+    // Create the first revision
+    await db.run(
+      'INSERT INTO revisions (document_id, filename, version) VALUES (?, ?, ?)',
+      [docId, filename, 1]
+    );
+
+    const newDoc = await db.get('SELECT * FROM documents WHERE id = ?', docId);
+    const revisions = await db.all('SELECT * FROM revisions WHERE document_id = ?', docId);
+    const fullDoc = { ...newDoc, revisions };
     
-    notifyNewItem(newItem);
-    res.status(201).json(newItem);
+    notifyNewItem(fullDoc);
+    res.status(201).json(fullDoc);
   } catch (error) {
-    console.error('Error adding to queue:', error);
+    console.error('Error adding document:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
 };
 
 export const updateStatus = async (req: Request, res: Response) => {
-  const { id } = req.params;
-  const { status } = req.body;
-
-  if (!status) {
-    return res.status(400).json({ error: 'Status is required' });
-  }
-
-  try {
-    const db = await getDb();
-    await db.run(
-      'UPDATE queue SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-      [status, id]
-    );
-    const updatedItem = await db.get('SELECT * FROM queue WHERE id = ?', id);
-    
-    notifyQueueUpdate(updatedItem);
-    res.json(updatedItem);
-  } catch (error) {
-    console.error('Error updating status:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  }
+  // We can keep this for compatibility or remove it since 'status' is gone from 'documents' table
+  res.status(410).json({ error: 'Status updates are no longer supported. Use revisions instead.' });
 };
