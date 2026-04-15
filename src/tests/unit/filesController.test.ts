@@ -1,20 +1,13 @@
 // Mock dependencies FIRST to avoid side effects during imports
 jest.mock('../../config/database');
 jest.mock('../../services/notificationService');
-// We will mock fs.renameSync specifically instead of the whole module
-import fs from 'fs';
-jest.mock('fs', () => {
-  const originalModule = jest.requireActual('fs');
-  return {
-    ...originalModule,
-    renameSync: jest.fn(),
-  };
-});
+jest.mock('fs');
 
 import { reviseFile } from '../../controllers/filesController';
 import { getDb } from '../../config/database';
 import { notifyQueueUpdate } from '../../services/notificationService';
 import { Request, Response } from 'express';
+import fs from 'fs';
 
 describe('Files Controller', () => {
   let mockRequest: Partial<Request>;
@@ -34,8 +27,10 @@ describe('Files Controller', () => {
     mockDb = {
       get: jest.fn(),
       run: jest.fn(),
+      all: jest.fn(),
     };
     (getDb as jest.Mock).mockResolvedValue(mockDb);
+    (fs.renameSync as jest.Mock).mockImplementation(() => {});
   });
 
   afterEach(() => {
@@ -43,26 +38,39 @@ describe('Files Controller', () => {
   });
 
   describe('reviseFile', () => {
-    it('should successfully revise a file', async () => {
-      const mockItem = { id: 1, filename: 'document.pdf', version: 1 };
-      const mockUpdatedItem = { id: 1, filename: 'document_v2.pdf', version: 2 };
-      
+    it('should successfully revise a file and create a new revision', async () => {
       mockRequest = {
         params: { id: '1' },
-        file: { path: '/tmp/upload', originalname: 'test.pdf' } as Express.Multer.File
+        file: { path: 'temp/path', filename: 'new_file.pdf' } as any,
       };
-      
-      mockDb.get.mockResolvedValueOnce(mockItem).mockResolvedValueOnce(mockUpdatedItem);
-      
+      const mockDoc = { id: 1, name: 'document.pdf' };
+      const mockLatestRevision = { version: 1, filename: 'document.pdf' };
+      const mockUpdatedDoc = { id: 1, name: 'document.pdf', updated_at: '2026-04-15' };
+      const mockRevisions = [
+        { id: 2, document_id: 1, filename: 'document_v2.pdf', version: 2 },
+        { id: 1, document_id: 1, filename: 'document.pdf', version: 1 }
+      ];
+
+      mockDb.get
+        .mockResolvedValueOnce(mockDoc) // first call to find document
+        .mockResolvedValueOnce(mockLatestRevision) // second call to find latest revision
+        .mockResolvedValueOnce(mockUpdatedDoc); // third call to fetch updated doc
+
+      mockDb.all.mockResolvedValueOnce(mockRevisions); // fetch all revisions
+
       await reviseFile(mockRequest as Request, mockResponse as Response);
 
       expect(fs.renameSync).toHaveBeenCalled();
       expect(mockDb.run).toHaveBeenCalledWith(
-        expect.stringContaining('UPDATE queue'),
-        [expect.stringContaining('_v2.pdf'), 2, '1']
+        expect.stringContaining('INSERT INTO revisions'),
+        [expect.any(String), 'document_v2.pdf', 2]
       );
-      expect(notifyQueueUpdate).toHaveBeenCalledWith(mockUpdatedItem);
-      expect(mockJson).toHaveBeenCalledWith(mockUpdatedItem);
+      expect(mockDb.run).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE documents'),
+        '1'
+      );
+      expect(notifyQueueUpdate).toHaveBeenCalledWith({ ...mockUpdatedDoc, revisions: mockRevisions });
+      expect(mockJson).toHaveBeenCalledWith({ ...mockUpdatedDoc, revisions: mockRevisions });
     });
 
     it('should return 400 if no file is uploaded', async () => {
@@ -74,17 +82,17 @@ describe('Files Controller', () => {
       expect(mockJson).toHaveBeenCalledWith({ error: 'No file uploaded' });
     });
 
-    it('should return 404 if item not found', async () => {
+    it('should return 404 if document not found', async () => {
       mockRequest = {
-        params: { id: '999' },
-        file: { path: '/tmp/upload' } as Express.Multer.File
+        params: { id: '1' },
+        file: { path: 'temp/path' } as any,
       };
       mockDb.get.mockResolvedValue(null);
 
       await reviseFile(mockRequest as Request, mockResponse as Response);
 
       expect(mockStatus).toHaveBeenCalledWith(404);
-      expect(mockJson).toHaveBeenCalledWith({ error: 'Queue item not found' });
+      expect(mockJson).toHaveBeenCalledWith({ error: 'Document not found' });
     });
   });
 });

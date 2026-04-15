@@ -1,6 +1,6 @@
 import { Request, Response } from 'express';
 import { getDb } from '../config/database';
-import { notifyNewItem, notifyQueueUpdate } from '../services/notificationService';
+import { notifyNewItem } from '../services/notificationService';
 
 export const getQueue = async (req: Request, res: Response) => {
   try {
