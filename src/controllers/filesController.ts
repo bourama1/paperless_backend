@@ -30,10 +30,6 @@ export const reviseFile = async (req: Request, res: Response) => {
     const { annotations } = req.body;
     const file = req.file;
 
-    // Canvas dimensions sent by the mobile app (in screen pixels)
-    const canvasWidth = parseFloat(req.body.canvasWidth);
-    const canvasHeight = parseFloat(req.body.canvasHeight);
-
     if (!file) {
         console.warn("[Backend] No file uploaded");
         return res.status(400).json({ error: "No file uploaded" });

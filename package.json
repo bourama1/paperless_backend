@@ -7,7 +7,7 @@
     "start": "node dist/index.js",
     "dev": "nodemon --watch src/**/*.ts --exec ts-node src/index.ts",
     "build": "tsc",
-    "lint": "eslint -c src/config/eslint.config.mts src/**/*.ts",
+    "lint": "eslint --ext .ts --config eslint.config.mjs src",
     "test": "jest"
   },
   "keywords": [],
