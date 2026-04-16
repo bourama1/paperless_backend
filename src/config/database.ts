@@ -1,35 +1,35 @@
-import { open, Database } from "sqlite";
-import path from "path";
-import dotenv from "dotenv";
-import fs from "fs";
+import { open, Database } from 'sqlite';
+import path from 'path';
+import dotenv from 'dotenv';
+import fs from 'fs';
 
 dotenv.config();
 
 let db: Database | null = null;
 
 export const getDb = async () => {
-    if (db) return db;
+  if (db) return db;
 
-    const sqlite3 = require("sqlite3");
-    const dbPath = process.env.DATABASE_URL || "./data/database.sqlite";
-    const dbDir = path.dirname(dbPath);
+  const sqlite3 = require('sqlite3');
+  const dbPath = process.env.DATABASE_URL || './data/database.sqlite';
+  const dbDir = path.dirname(dbPath);
 
-    if (!fs.existsSync(dbDir)) {
-        fs.mkdirSync(dbDir, { recursive: true });
-    }
+  if (!fs.existsSync(dbDir)) {
+    fs.mkdirSync(dbDir, { recursive: true });
+  }
 
-    db = await open({
-        filename: dbPath,
-        driver: sqlite3.Database,
-    });
+  db = await open({
+    filename: dbPath,
+    driver: sqlite3.Database,
+  });
 
-    await setupDatabase(db);
-    return db;
+  await setupDatabase(db);
+  return db;
 };
 
 const setupDatabase = async (db: Database) => {
-    // 1. Create documents table (renamed from queue)
-    await db.exec(`
+  // 1. Create documents table (renamed from queue)
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS documents (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       name TEXT NOT NULL,
@@ -38,8 +38,8 @@ const setupDatabase = async (db: Database) => {
     )
   `);
 
-    // 2. Create revisions table
-    await db.exec(`
+  // 2. Create revisions table
+  await db.exec(`
     CREATE TABLE IF NOT EXISTS revisions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       document_id INTEGER NOT NULL,
@@ -51,37 +51,37 @@ const setupDatabase = async (db: Database) => {
     )
   `);
 
-    // 3. Simple migration for existing 'queue' table if it exists
-    try {
-        const queueExists = await db.get("SELECT name FROM sqlite_master WHERE type='table' AND name='queue'");
-        if (queueExists) {
-            console.log("Migrating existing queue table to documents/revisions...");
-            const oldItems = await db.all("SELECT * FROM queue");
-            for (const item of oldItems) {
-                const docResult = await db.run(
-                    "INSERT INTO documents (name, created_at, updated_at) VALUES (?, ?, ?)",
-                    [item.filename, item.created_at, item.updated_at],
-                );
-                await db.run("INSERT INTO revisions (document_id, filename, version, created_at) VALUES (?, ?, ?, ?)", [
-                    docResult.lastID,
-                    item.filename,
-                    item.version,
-                    item.created_at,
-                ]);
-            }
-            await db.exec("DROP TABLE queue");
-            console.log("Migration complete.");
-        }
-
-        // 4. Ensure 'annotations' column exists in 'revisions'
-        const columnInfo = await db.all("PRAGMA table_info(revisions)");
-        const hasAnnotations = columnInfo.some((col) => col.name === "annotations");
-        if (!hasAnnotations) {
-            console.log("Adding annotations column to revisions table...");
-            await db.exec("ALTER TABLE revisions ADD COLUMN annotations TEXT");
-            console.log("Column added.");
-        }
-    } catch (e) {
-        console.error("Migration failed or already completed:", e);
+  // 3. Simple migration for existing 'queue' table if it exists
+  try {
+    const queueExists = await db.get(
+      "SELECT name FROM sqlite_master WHERE type='table' AND name='queue'",
+    );
+    if (queueExists) {
+      console.log('Migrating existing queue table to documents/revisions...');
+      const oldItems = await db.all('SELECT * FROM queue');
+      for (const item of oldItems) {
+        const docResult = await db.run(
+          'INSERT INTO documents (name, created_at, updated_at) VALUES (?, ?, ?)',
+          [item.filename, item.created_at, item.updated_at],
+        );
+        await db.run(
+          'INSERT INTO revisions (document_id, filename, version, created_at) VALUES (?, ?, ?, ?)',
+          [docResult.lastID, item.filename, item.version, item.created_at],
+        );
+      }
+      await db.exec('DROP TABLE queue');
+      console.log('Migration complete.');
     }
+
+    // 4. Ensure 'annotations' column exists in 'revisions'
+    const columnInfo = await db.all('PRAGMA table_info(revisions)');
+    const hasAnnotations = columnInfo.some(col => col.name === 'annotations');
+    if (!hasAnnotations) {
+      console.log('Adding annotations column to revisions table...');
+      await db.exec('ALTER TABLE revisions ADD COLUMN annotations TEXT');
+      console.log('Column added.');
+    }
+  } catch (e) {
+    console.error('Migration failed or already completed:', e);
+  }
 };
