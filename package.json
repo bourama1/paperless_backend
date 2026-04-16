@@ -20,6 +20,7 @@
     "express": "^5.2.1",
     "morgan": "^1.10.1",
     "multer": "^2.1.1",
+    "pdf-lib": "^1.17.1",
     "socket.io": "^4.8.3",
     "sqlite": "^5.1.1",
     "sqlite3": "^6.0.1"
