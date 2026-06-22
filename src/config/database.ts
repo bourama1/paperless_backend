@@ -51,7 +51,33 @@ const setupDatabase = async (db: Database) => {
     )
   `);
 
-  // 3. Simple migration for existing 'queue' table if it exists
+  // 3. Create workstations table
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS workstations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      current_order_id TEXT,
+      current_order_data TEXT,
+      is_active INTEGER DEFAULT 1,
+      last_polled_at DATETIME
+    )
+  `);
+
+  // 4. Create workstation_log table
+  await db.exec(`
+    CREATE TABLE IF NOT EXISTS workstation_log (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      workstation_name TEXT NOT NULL,
+      order_id TEXT NOT NULL,
+      action TEXT NOT NULL CHECK(action IN ('STARTED', 'FINISHED')),
+      order_snapshot TEXT,
+      cycle_index INTEGER DEFAULT 1,
+      total_cycles INTEGER DEFAULT 1,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  // 5. Simple migration for existing 'queue' table if it exists
   try {
     const queueExists = await db.get(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='queue'",
@@ -73,7 +99,7 @@ const setupDatabase = async (db: Database) => {
       console.log('Migration complete.');
     }
 
-    // 4. Ensure 'annotations' column exists in 'revisions'
+    // 6. Ensure 'annotations' column exists in 'revisions'
     const columnInfo = await db.all('PRAGMA table_info(revisions)');
     const hasAnnotations = columnInfo.some(col => col.name === 'annotations');
     if (!hasAnnotations) {

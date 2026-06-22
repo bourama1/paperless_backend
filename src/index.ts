@@ -11,6 +11,7 @@ import { getDb } from './config/database';
 
 import queueRoutes from './routes/queue';
 import filesRoutes from './routes/files';
+import workstationRoutes from './routes/workstations';
 
 // Load environment variables
 dotenv.config();
@@ -61,6 +62,7 @@ app.use('/files', express.static(STORAGE_PATH));
 // Routes
 app.use('/queue', queueRoutes);
 app.use('/files', filesRoutes);
+app.use('/workstations', workstationRoutes);
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
@@ -78,6 +80,13 @@ io.on('connection', socket => {
 if (process.env.NODE_ENV !== 'test') {
   httpServer.listen(PORT, () => {
     console.log(`Server running on port ${PORT}`);
+
+    // Start polling workstations
+    const { pollWorkstations } = require('./services/workstationService');
+    const POLL_INTERVAL = parseInt(process.env.WORKSTATIONS_POLL_INTERVAL || '15000', 10);
+    pollWorkstations();
+    setInterval(pollWorkstations, POLL_INTERVAL);
+    console.log(`Workstation polling started (interval: ${POLL_INTERVAL}ms)`);
   });
 }
 
