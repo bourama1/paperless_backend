@@ -1,6 +1,4 @@
 import axios from 'axios';
-import fs from 'fs';
-import path from 'path';
 import { getDb } from '../config/database';
 
 const WORKSTATIONS_API_URL =
@@ -230,39 +228,31 @@ export const importDocument = async (req: PbomImportRequest) => {
   const docType = req.documentType || DOCUMENT_TYPES.PBOM_HARDWARE;
 
   const fetchUrl = `${DOC_MANAGER_URL}/api/documents/fetch`;
-  const fileName = `PBOM_Hardware_${req.salesOrder}_${req.position}.pdf`;
-  const storagePath = process.env.STORAGE_PATH || './storage';
-  const importDir = path.join(storagePath, 'imports');
-  if (!fs.existsSync(importDir)) {
-    fs.mkdirSync(importDir, { recursive: true });
-  }
 
-  const localPath = path.join(importDir, fileName);
-  const downloadRes = await axios.get(fetchUrl, {
+  // Fetch headers to get the real filename from doc_manager (without downloading body)
+  const headRes = await axios.get(fetchUrl, {
     params: {
       order_code: req.salesOrder,
       position_code: req.position,
       document_type: docType,
     },
     responseType: 'stream',
-    timeout: 30000,
+    timeout: 10000,
   });
+  const cd = headRes.headers['content-disposition'] || '';
+  const fileNameMatch = cd.match(/filename="?(.+?)"?$/);
+  const originalName = fileNameMatch ? fileNameMatch[1]!.trim() : `P${req.salesOrder}_${req.position}_Hardware.pdf`;
+  headRes.data.destroy();
 
-  const writer = fs.createWriteStream(localPath);
-  await new Promise<void>((resolve, reject) => {
-    downloadRes.data.pipe(writer);
-    writer.on('finish', resolve);
-    writer.on('error', reject);
-  });
+  const docRef = `docmgr://${req.salesOrder}/${req.position}/${docType}`;
 
   const db = await getDb();
-  const docName = `PBOM_Hardware_${req.salesOrder}_${req.position}.pdf`;
-  const docResult = await db.run('INSERT INTO documents (name) VALUES (?)', [docName]);
+  const docResult = await db.run('INSERT INTO documents (name) VALUES (?)', [originalName]);
   const docId = docResult.lastID;
 
   await db.run(
     'INSERT INTO revisions (document_id, filename, version) VALUES (?, ?, ?)',
-    [docId, path.join('imports', fileName), 1],
+    [docId, docRef, 1],
   );
 
   const newDoc = await db.get('SELECT * FROM documents WHERE id = ?', docId);
