@@ -6,7 +6,6 @@ import {
   importPbom,
   searchPbomHandler,
   openEditor,
-  editorDone,
   renderDocument,
 } from '../controllers/workstationController';
 
@@ -18,7 +17,6 @@ router.get('/log', getWorkstationLog);
 router.post('/import-pbom', importPbom);
 router.get('/search-pbom', searchPbomHandler);
 router.post('/open-editor', openEditor);
-router.get('/editor-done', editorDone);
 router.get('/documents/:id/render', renderDocument);
 
 export default router;
