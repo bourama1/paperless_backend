@@ -5,8 +5,6 @@ import {
     getWorkstationLog,
     importPbom,
     searchPbomHandler,
-    openEditor,
-    confirmEdited,
     saveEdited,
     renderDocument,
 } from "../controllers/workstationController";
@@ -18,8 +16,6 @@ router.post("/order-update", receiveOrderUpdate);
 router.get("/log", getWorkstationLog);
 router.post("/import-pbom", importPbom);
 router.get("/search-pbom", searchPbomHandler);
-router.post("/open-editor", openEditor);
-router.post("/confirm-edited", confirmEdited);
 router.post("/save-edited", saveEdited);
 router.get("/documents/:id/render", renderDocument);
 

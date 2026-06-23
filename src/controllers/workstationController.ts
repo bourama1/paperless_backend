@@ -6,11 +6,9 @@ import fs from "fs";
 import axios from "axios";
 import { Readable } from "stream";
 
-const EDITOR_URL = process.env.EDITOR_URL || "http://tocz-app4:3000";
 const DOC_MANAGER_URL = process.env.DOC_MANAGER_URL || "http://tocz-app4:5200";
 const EDITED_PDF_PATH = process.env.EDITED_PDF_PATH || "";
 const STORAGE_PATH = process.env.STORAGE_PATH || "./storage";
-const BACKEND_URL = process.env.BACKEND_URL || "";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -197,98 +195,6 @@ export const renderDocument = async (req: Request, res: Response) => {
     }
 };
 
-async function resolveDocumentMeta(documentId: number): Promise<{
-    docmgrUrl: string;
-    filename: string;
-    saveDir: string;
-    saveFilename: string;
-} | null> {
-    const db = await getDb();
-    const doc = await db.get("SELECT * FROM documents WHERE id = ?", documentId);
-    if (!doc) return null;
-
-    const latestRev = await db.get(
-        "SELECT filename, version FROM revisions WHERE document_id = ? ORDER BY version DESC LIMIT 1",
-        documentId,
-    );
-    if (!latestRev) return null;
-
-    const ref = latestRev.filename;
-    const parsed = parseDocmgrRef(ref);
-
-    if (!parsed) {
-        console.error(`Document ${documentId} has no docmgr:// ref (ref: ${ref})`);
-        return null;
-    }
-
-    const docmgrUrl = `${DOC_MANAGER_URL}/api/documents/fetch?order_code=${parsed.orderCode}&position_code=${parsed.positionCode}&document_type=${parsed.docType}`;
-
-    // Count edits (revisions that are not docmgr:// references)
-    const editCountResult = await db.get(
-        "SELECT COUNT(*) as count FROM revisions WHERE document_id = ? AND filename NOT LIKE ?",
-        [documentId, "docmgr://%"],
-    );
-    const editRev = (editCountResult?.count || 0) + 1;
-
-    // Calculate next revision filename
-    const originalName = doc.name;
-    const ext = path.extname(originalName);
-    let base = path.basename(originalName, ext);
-    const revMatch = base.match(/^(.*)_Rev(\d+)$/i);
-    const sourceRev = revMatch ? parseInt(revMatch[2]!, 10) : 0;
-    const revNumber = Math.max(editRev, sourceRev + 1);
-    const newFilename = revMatch ? `${revMatch[1]}_Rev${revNumber}${ext}` : `${base}_Rev${revNumber}${ext}`;
-
-    const saveDir = EDITED_PDF_PATH;
-
-    return { docmgrUrl, filename: doc.name, saveDir, saveFilename: newFilename };
-}
-
-export const openEditor = async (req: Request, res: Response) => {
-    const { documentId } = req.body;
-
-    if (!documentId) {
-        return res.status(400).json({ error: "documentId is required" });
-    }
-
-    try {
-        const meta = await resolveDocumentMeta(Number(documentId));
-        if (!meta) {
-            return res.status(404).json({ error: "Document not found or has no docmgr reference" });
-        }
-
-        // Compute the callback URL — the editor will POST here after save
-        const callbackUrl =
-            BACKEND_URL ?
-                `${BACKEND_URL.replace(/\/+$/, "")}/workstations/confirm-edited`
-            :   `http://${req.headers.host}/workstations/confirm-edited`;
-
-        const response = await axios.post(
-            `${EDITOR_URL}/edit-from-docmgr`,
-            {
-                docmgrUrl: meta.docmgrUrl,
-                filename: meta.filename,
-                returnUrl: "app",
-                callbackUrl,
-                documentId: Number(documentId),
-            },
-            {
-                timeout: 30000,
-            },
-        );
-
-        const sessionId = response.data.id;
-        console.log(`[open-editor] Document ${documentId} → session ${sessionId}, callback: ${callbackUrl}`);
-
-        res.json({ editUrl: response.data.editUrl, sessionId });
-    } catch (error: unknown) {
-        console.error("Error opening editor:", error);
-        const axiosErr = error as { response?: { data?: { error?: string } }; message?: string };
-        const msg = axiosErr?.response?.data?.error || axiosErr?.message || "Failed to open editor";
-        res.status(500).json({ error: msg });
-    }
-};
-
 async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
     const db = await getDb();
     const doc = await db.get("SELECT * FROM documents WHERE id = ?", documentId);
@@ -351,29 +257,6 @@ export const saveEdited = async (req: Request, res: Response) => {
         res.json({ status: "ok", ...result });
     } catch (error: any) {
         console.error("Error saving edited document:", error);
-        res.status(500).json({ error: error.message || "Internal server error" });
-    }
-};
-
-export const confirmEdited = async (req: Request, res: Response) => {
-    const { documentId, sessionId } = req.body;
-    if (!documentId || !sessionId) {
-        return res.status(400).json({ error: "documentId and sessionId are required" });
-    }
-
-    try {
-        const pdfUrl = `${EDITOR_URL}/sessions/${sessionId}/pdf`;
-        console.log(`[confirm-edited] Fetching PDF from ${pdfUrl}`);
-        const pdfResponse = await axios.get(pdfUrl, {
-            responseType: "arraybuffer",
-            timeout: 30000,
-        });
-        const pdfBuffer = Buffer.from(pdfResponse.data);
-        const result = await saveEditedPdf(Number(documentId), pdfBuffer);
-        console.log(`[confirm-edited] Done for document ${documentId}`);
-        res.json({ status: "ok", ...result });
-    } catch (error: any) {
-        console.error("Error confirming edited document:", error);
         res.status(500).json({ error: error.message || "Internal server error" });
     }
 };
