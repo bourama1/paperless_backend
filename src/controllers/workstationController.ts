@@ -104,15 +104,15 @@ export const receiveOrderUpdate = async (req: Request, res: Response) => {
 };
 
 export const importPbom = async (req: Request, res: Response) => {
-    const { salesOrder, position, customer, productOrder, productDesc, documentType } = req.body;
+    const { projectNumber, position, customer, productOrder, productDesc, documentType } = req.body;
 
-    if (!salesOrder || !position || !customer) {
-        return res.status(400).json({ error: "salesOrder, position, and customer are required" });
+    if (!projectNumber || !position || !customer) {
+        return res.status(400).json({ error: "projectNumber, position, and customer are required" });
     }
 
     try {
         const doc = await importDocument({
-            salesOrder,
+            projectNumber,
             position,
             customer,
             productOrder,

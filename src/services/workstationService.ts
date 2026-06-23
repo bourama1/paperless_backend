@@ -210,7 +210,7 @@ async function fetchDocumentsByType(
 }
 
 export interface PbomImportRequest {
-  salesOrder: string;
+  projectNumber: string;
   position: string;
   customer: string;
   productOrder?: string;
@@ -232,7 +232,7 @@ export const importDocument = async (req: PbomImportRequest) => {
   // Fetch headers to get the real filename from doc_manager (without downloading body)
   const headRes = await axios.get(fetchUrl, {
     params: {
-      order_code: req.salesOrder,
+      order_code: req.projectNumber,
       position_code: req.position,
       document_type: docType,
     },
@@ -241,10 +241,10 @@ export const importDocument = async (req: PbomImportRequest) => {
   });
   const cd = headRes.headers['content-disposition'] || '';
   const fileNameMatch = cd.match(/filename="?(.+?)"?$/);
-  const originalName = fileNameMatch ? fileNameMatch[1]!.trim() : `P${req.salesOrder}_${req.position}_Hardware.pdf`;
+  const originalName = fileNameMatch ? fileNameMatch[1]!.trim() : `P${req.projectNumber}_${req.position}_Hardware.pdf`;
   headRes.data.destroy();
 
-  const docRef = `docmgr://${req.salesOrder}/${req.position}/${docType}`;
+  const docRef = `docmgr://${req.projectNumber}/${req.position}/${docType}`;
 
   const db = await getDb();
   const docResult = await db.run('INSERT INTO documents (name) VALUES (?)', [originalName]);
