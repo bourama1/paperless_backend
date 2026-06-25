@@ -10,10 +10,7 @@ const DOC_MANAGER_URL = process.env.DOC_MANAGER_URL || "http://tocz-app4:5200";
 const EDITED_PDF_PATH = process.env.EDITED_PDF_PATH || "";
 const STORAGE_PATH = process.env.STORAGE_PATH || "./storage";
 
-// ── helpers ─────────────────────────────────────────────────────────────────
-
 function parseDocmgrRef(ref: string) {
-    // docmgr://{order_code}/{position_code}/{docType}
     const m = ref.match(/^docmgr:\/\/([^/]+)\/([^/]+)\/(\d+)$/);
     if (!m) return null;
     return {
@@ -25,18 +22,14 @@ function parseDocmgrRef(ref: string) {
 
 async function resolveDocumentStream(documentId: number): Promise<{ stream: Readable; filename: string } | null> {
     const db = await getDb();
-    const doc = await db.get("SELECT * FROM documents WHERE id = ?", documentId);
+    const doc = await db("documents").where("id", documentId).first();
     if (!doc) return null;
 
-    const latestRev = await db.get(
-        "SELECT filename, version FROM revisions WHERE document_id = ? ORDER BY version DESC LIMIT 1",
-        documentId,
-    );
+    const latestRev = await db("revisions").where("document_id", documentId).orderBy("version", "desc").first();
     if (!latestRev) return null;
 
     const ref = latestRev.filename;
 
-    // docmgr:// reference → fetch from doc_manager
     const parsed = parseDocmgrRef(ref);
     if (parsed) {
         const url = `${DOC_MANAGER_URL}/api/documents/fetch`;
@@ -55,7 +48,6 @@ async function resolveDocumentStream(documentId: number): Promise<{ stream: Read
         };
     }
 
-    // Legacy local file reference (imported before switch to docmgr://)
     const localPath = path.join(STORAGE_PATH, ref);
     if (fs.existsSync(localPath)) {
         return { stream: fs.createReadStream(localPath), filename: ref };
@@ -64,14 +56,12 @@ async function resolveDocumentStream(documentId: number): Promise<{ stream: Read
     return null;
 }
 
-// ── exports ──────────────────────────────────────────────────────────────────
-
 export const getWorkstations = async (req: Request, res: Response) => {
     try {
         const db = await getDb();
-        const workstations = await db.all("SELECT * FROM workstations ORDER BY name");
+        const workstations = await db("workstations").orderBy("name");
 
-        const result = workstations.map((ws) => ({
+        const result = workstations.map((ws: any) => ({
             ...ws,
             current_order_data: ws.current_order_data ? JSON.parse(ws.current_order_data) : null,
         }));
@@ -148,24 +138,21 @@ export const getWorkstationLog = async (req: Request, res: Response) => {
         const db = await getDb();
         const { workstation, limit } = req.query;
 
-        let query = "SELECT * FROM workstation_log";
-        const params: string[] = [];
+        let query = db("workstation_log");
 
         if (workstation) {
-            query += " WHERE workstation_name = ?";
-            params.push(workstation as string);
+            query = query.where("workstation_name", workstation as string);
         }
 
-        query += " ORDER BY created_at DESC";
+        query = query.orderBy("created_at", "desc");
 
         if (limit) {
-            query += " LIMIT ?";
-            params.push(limit as string);
+            query = query.limit(parseInt(limit as string, 10));
         }
 
-        const logs = await db.all(query, params);
+        const logs = await query;
 
-        const result = logs.map((log) => ({
+        const result = logs.map((log: any) => ({
             ...log,
             order_snapshot: log.order_snapshot ? JSON.parse(log.order_snapshot) : null,
         }));
@@ -197,14 +184,16 @@ export const renderDocument = async (req: Request, res: Response) => {
 
 async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
     const db = await getDb();
-    const doc = await db.get("SELECT * FROM documents WHERE id = ?", documentId);
+    const doc = await db("documents").where("id", documentId).first();
     if (!doc) throw new Error("Document not found");
 
-    const editCountResult = await db.get(
-        "SELECT COUNT(*) as count FROM revisions WHERE document_id = ? AND filename NOT LIKE ?",
-        [documentId, "docmgr://%"],
-    );
-    const editRev = (editCountResult?.count || 0) + 1;
+    const editCountResult = await db("revisions")
+        .where("document_id", documentId)
+        .whereNot("filename", "like", "docmgr://%")
+        .count("* as count")
+        .first();
+    const editCount = Number((editCountResult as any)?.count || 0);
+    const editRev = editCount + 1;
 
     const ext = path.extname(doc.name);
     let base = path.basename(doc.name, ext);
@@ -234,11 +223,11 @@ async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
         }
     }
 
-    await db.run("INSERT INTO revisions (document_id, filename, version) VALUES (?, ?, ?)", [
-        documentId,
-        newFilename,
-        revNumber,
-    ]);
+    await db("revisions").insert({
+        document_id: documentId,
+        filename: newFilename,
+        version: revNumber,
+    });
     console.log(`[save-edited-pdf] Created revision ${revNumber} for document ${documentId}`);
 
     return { filename: newFilename, revision: revNumber };

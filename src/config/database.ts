@@ -1,113 +1,143 @@
-import { open, Database } from 'sqlite';
-import path from 'path';
-import dotenv from 'dotenv';
-import fs from 'fs';
+import knex, { Knex } from "knex";
+import path from "path";
+import dotenv from "dotenv";
+import fs from "fs";
 
 dotenv.config();
 
-let db: Database | null = null;
+let db: Knex | null = null;
+
+function getDbType(): "sqlite" | "postgres" {
+    return (process.env.DB_TYPE as "sqlite" | "postgres") || "sqlite";
+}
+
+export async function insertGetId<T extends Record<string, any>>(
+    targetDb: Knex,
+    table: string,
+    data: T,
+    idColumn: keyof T & string = "id" as any,
+): Promise<number> {
+    const result = await targetDb(table).insert(data).returning(idColumn);
+    const row = result[0];
+    if (typeof row === "number") return row;
+    if (row && typeof row === "object" && idColumn in row) return Number(row[idColumn]);
+    throw new Error(`insertGetId: could not determine ${String(idColumn)}`);
+}
 
 export const getDb = async () => {
-  if (db) return db;
+    if (db) return db;
 
-  const sqlite3 = require('sqlite3');
-  const dbPath = process.env.DATABASE_URL || './data/database.sqlite';
-  const dbDir = path.dirname(dbPath);
+    const dbType = getDbType();
 
-  if (!fs.existsSync(dbDir)) {
-    fs.mkdirSync(dbDir, { recursive: true });
-  }
+    if (dbType === "postgres") {
+        db = knex({
+            client: "pg",
+            connection: {
+                host: process.env.PG_HOST || "localhost",
+                port: parseInt(process.env.PG_PORT || "5432", 10),
+                database: process.env.PG_DATABASE || "paperless",
+                user: process.env.PG_USER || "postgres",
+                password: process.env.PG_PASSWORD || "",
+            },
+            pool: { min: 0, max: 10 },
+        });
+    } else {
+        const dbPath = process.env.DATABASE_URL || "./data/database.sqlite";
+        const dbDir = path.dirname(dbPath);
 
-  db = await open({
-    filename: dbPath,
-    driver: sqlite3.Database,
-  });
+        if (!fs.existsSync(dbDir)) {
+            fs.mkdirSync(dbDir, { recursive: true });
+        }
 
-  await setupDatabase(db);
-  return db;
+        db = knex({
+            client: "sqlite3",
+            connection: { filename: dbPath },
+            useNullAsDefault: true,
+        });
+    }
+
+    await setupDatabase(db);
+    return db;
 };
 
-const setupDatabase = async (db: Database) => {
-  // 1. Create documents table (renamed from queue)
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS documents (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+const setupDatabase = async (targetDb: Knex) => {
+    // 1. documents table
+    if (!(await targetDb.schema.hasTable("documents"))) {
+        await targetDb.schema.createTable("documents", (table) => {
+            table.increments("id").primary();
+            table.string("name").notNullable();
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+        });
+    }
 
-  // 2. Create revisions table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS revisions (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      document_id INTEGER NOT NULL,
-      filename TEXT NOT NULL,
-      version INTEGER DEFAULT 1,
-      annotations TEXT, -- Store SVG paths as JSON string
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (document_id) REFERENCES documents(id)
-    )
-  `);
+    // 2. revisions table
+    if (!(await targetDb.schema.hasTable("revisions"))) {
+        await targetDb.schema.createTable("revisions", (table) => {
+            table.increments("id").primary();
+            table.integer("document_id").notNullable().references("id").inTable("documents");
+            table.string("filename").notNullable();
+            table.integer("version").defaultTo(1);
+            table.text("annotations");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
 
-  // 3. Create workstations table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS workstations (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      name TEXT NOT NULL UNIQUE,
-      current_order_id TEXT,
-      current_order_data TEXT,
-      is_active INTEGER DEFAULT 1,
-      last_polled_at DATETIME
-    )
-  `);
+    // 3. workstations table
+    if (!(await targetDb.schema.hasTable("workstations"))) {
+        await targetDb.schema.createTable("workstations", (table) => {
+            table.increments("id").primary();
+            table.string("name").notNullable().unique();
+            table.string("current_order_id");
+            table.text("current_order_data");
+            table.integer("is_active").defaultTo(1);
+            table.timestamp("last_polled_at");
+        });
+    }
 
-  // 4. Create workstation_log table
-  await db.exec(`
-    CREATE TABLE IF NOT EXISTS workstation_log (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      workstation_name TEXT NOT NULL,
-      order_id TEXT NOT NULL,
-      action TEXT NOT NULL CHECK(action IN ('STARTED', 'FINISHED')),
-      order_snapshot TEXT,
-      cycle_index INTEGER DEFAULT 1,
-      total_cycles INTEGER DEFAULT 1,
-      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-    )
-  `);
+    // 4. workstation_log table
+    if (!(await targetDb.schema.hasTable("workstation_log"))) {
+        await targetDb.schema.createTable("workstation_log", (table) => {
+            table.increments("id").primary();
+            table.string("workstation_name").notNullable();
+            table.string("order_id").notNullable();
+            table.string("action").notNullable();
+            table.text("order_snapshot");
+            table.integer("cycle_index").defaultTo(1);
+            table.integer("total_cycles").defaultTo(1);
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
 
-  // 5. Simple migration for existing 'queue' table if it exists
-  try {
-    const queueExists = await db.get(
-      "SELECT name FROM sqlite_master WHERE type='table' AND name='queue'",
-    );
-    if (queueExists) {
-      console.log('Migrating existing queue table to documents/revisions...');
-      const oldItems = await db.all('SELECT * FROM queue');
-      for (const item of oldItems) {
-        const docResult = await db.run(
-          'INSERT INTO documents (name, created_at, updated_at) VALUES (?, ?, ?)',
-          [item.filename, item.created_at, item.updated_at],
-        );
-        await db.run(
-          'INSERT INTO revisions (document_id, filename, version, created_at) VALUES (?, ?, ?, ?)',
-          [docResult.lastID, item.filename, item.version, item.created_at],
-        );
-      }
-      await db.exec('DROP TABLE queue');
-      console.log('Migration complete.');
+    // 5. Migration from legacy 'queue' table
+    const hasQueue = await targetDb.schema.hasTable("queue");
+    if (hasQueue) {
+        console.log("Migrating existing queue table to documents/revisions...");
+        const rows = await targetDb("queue").select("*");
+        for (const row of rows) {
+            const docId = await insertGetId(targetDb, "documents", {
+                name: row.filename,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            });
+            await targetDb("revisions").insert({
+                document_id: docId,
+                filename: row.filename,
+                version: row.version,
+                created_at: row.created_at,
+            });
+        }
+        await targetDb.schema.dropTable("queue");
+        console.log("Migration complete.");
     }
 
     // 6. Ensure 'annotations' column exists in 'revisions'
-    const columnInfo = await db.all('PRAGMA table_info(revisions)');
-    const hasAnnotations = columnInfo.some(col => col.name === 'annotations');
+    const hasAnnotations = await targetDb.schema.hasColumn("revisions", "annotations");
     if (!hasAnnotations) {
-      console.log('Adding annotations column to revisions table...');
-      await db.exec('ALTER TABLE revisions ADD COLUMN annotations TEXT');
-      console.log('Column added.');
+        console.log("Adding annotations column to revisions table...");
+        await targetDb.schema.alterTable("revisions", (table) => {
+            table.text("annotations");
+        });
+        console.log("Column added.");
     }
-  } catch (e) {
-    console.error('Migration failed or already completed:', e);
-  }
 };

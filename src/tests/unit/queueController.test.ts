@@ -1,104 +1,112 @@
-// Mock dependencies FIRST to avoid side effects during imports
-jest.mock('../../config/database');
-jest.mock('../../services/notificationService');
+jest.mock("../../config/database");
+jest.mock("../../services/notificationService");
 
-import { getQueue, addToQueue, updateStatus } from '../../controllers/queueController';
-import { getDb } from '../../config/database';
-import { notifyNewItem } from '../../services/notificationService';
-import { Request, Response } from 'express';
+import { getQueue, addToQueue, updateStatus } from "../../controllers/queueController";
+import { getDb, insertGetId } from "../../config/database";
+import { notifyNewItem } from "../../services/notificationService";
+import { Request, Response } from "express";
 
-describe('Queue Controller', () => {
-  let mockRequest: Partial<Request>;
-  let mockResponse: Partial<Response>;
-  let mockJson: jest.Mock;
-  let mockStatus: jest.Mock;
+/** Build a thenable that resolves to `value` when awaited via `.then()` */
+function thenable<T>(value: T) {
+    return { then: (resolve: (v: T) => void) => resolve(value) };
+}
 
-  let mockDb: any;
+describe("Queue Controller", () => {
+    let mockRequest: Partial<Request>;
+    let mockResponse: Partial<Response>;
+    let mockJson: jest.Mock;
+    let mockStatus: jest.Mock;
 
-  beforeEach(() => {
-    mockJson = jest.fn();
-    mockStatus = jest.fn().mockReturnValue({ json: mockJson });
-    mockResponse = {
-      json: mockJson,
-      status: mockStatus,
-    };
-    mockDb = {
-      all: jest.fn(),
-      run: jest.fn(),
-      get: jest.fn(),
-    };
-    (getDb as jest.Mock).mockResolvedValue(mockDb);
-  });
-
-  afterEach(() => {
-    jest.clearAllMocks();
-  });
-
-  describe('getQueue', () => {
-    it('should return all documents with revisions', async () => {
-      const mockDocs = [{ id: 1, name: 'doc1.pdf' }];
-      const mockRevisions = [{ id: 1, document_id: 1, filename: 'doc1.pdf', version: 1 }];
-
-      mockDb.all
-        .mockResolvedValueOnce(mockDocs) // for documents
-        .mockResolvedValueOnce(mockRevisions); // for revisions of doc 1
-
-      await getQueue(mockRequest as Request, mockResponse as Response);
-
-      expect(mockDb.all).toHaveBeenCalledWith(expect.stringContaining('SELECT * FROM documents'));
-      expect(mockJson).toHaveBeenCalledWith([{ ...mockDocs[0], revisions: mockRevisions }]);
+    beforeEach(() => {
+        mockJson = jest.fn();
+        mockStatus = jest.fn().mockReturnValue({ json: mockJson });
+        mockResponse = { json: mockJson, status: mockStatus };
     });
 
-    it('should handle errors', async () => {
-      mockDb.all.mockRejectedValue(new Error('DB Error'));
-
-      await getQueue(mockRequest as Request, mockResponse as Response);
-
-      expect(mockStatus).toHaveBeenCalledWith(500);
-      expect(mockJson).toHaveBeenCalledWith({ error: 'Internal server error' });
-    });
-  });
-
-  describe('addToQueue', () => {
-    it('should add a document and its first revision', async () => {
-      mockRequest = { body: { filename: 'test.pdf' } };
-      const mockNewDoc = { id: 1, name: 'test.pdf' };
-      const mockRevisions = [{ id: 1, document_id: 1, filename: 'test.pdf', version: 1 }];
-
-      mockDb.run.mockResolvedValue({ lastID: 1 });
-      mockDb.get.mockResolvedValue(mockNewDoc);
-      mockDb.all.mockResolvedValue(mockRevisions);
-
-      await addToQueue(mockRequest as Request, mockResponse as Response);
-
-      expect(mockDb.run).toHaveBeenCalledWith(expect.stringContaining('INSERT INTO documents'), [
-        'test.pdf',
-      ]);
-      expect(notifyNewItem).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
-      expect(mockStatus).toHaveBeenCalledWith(201);
-      expect(mockJson).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
+    afterEach(() => {
+        jest.clearAllMocks();
     });
 
-    it('should return 400 if filename is missing', async () => {
-      mockRequest = { body: {} };
+    describe("getQueue", () => {
+        it("should return all documents with revisions", async () => {
+            const mockDocs = [{ id: 1, name: "doc1.pdf" }];
+            const mockRevisions = [{ id: 1, document_id: 1, filename: "doc1.pdf", version: 1 }];
 
-      await addToQueue(mockRequest as Request, mockResponse as Response);
+            const db = jest.fn();
+            db.mockImplementation((table: string) => {
+                if (table === "documents") {
+                    return { orderBy: () => thenable(mockDocs) };
+                }
+                return { where: () => ({ orderBy: () => thenable(mockRevisions) }) };
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
 
-      expect(mockStatus).toHaveBeenCalledWith(400);
-      expect(mockJson).toHaveBeenCalledWith({ error: 'Filename is required' });
+            await getQueue(mockRequest as Request, mockResponse as Response);
+
+            expect(db).toHaveBeenCalledWith("documents");
+            expect(db).toHaveBeenCalledWith("revisions");
+            expect(mockJson).toHaveBeenCalledWith([{ ...mockDocs[0], revisions: mockRevisions }]);
+        });
+
+        it("should handle errors", async () => {
+            const db = jest.fn(() => ({
+                orderBy: () => ({ then: (_: any, reject: Function) => reject(new Error("DB Error")) }),
+            }));
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getQueue(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(500);
+            expect(mockJson).toHaveBeenCalledWith({ error: "Internal server error" });
+        });
     });
-  });
 
-  describe('updateStatus', () => {
-    it('should return 410 Gone as status updates are deprecated', async () => {
-      mockRequest = { params: { id: '1' }, body: { status: 'in-progress' } };
+    describe("addToQueue", () => {
+        it("should add a document and its first revision", async () => {
+            mockRequest = { body: { filename: "test.pdf" } };
+            const mockNewDoc = { id: 1, name: "test.pdf" };
+            const mockRevisions = [{ id: 1, document_id: 1, filename: "test.pdf", version: 1 }];
 
-      await updateStatus(mockRequest as Request, mockResponse as Response);
+            (insertGetId as jest.Mock).mockResolvedValue(1);
 
-      expect(mockStatus).toHaveBeenCalledWith(410);
-      expect(mockJson).toHaveBeenCalledWith({
-        error: 'Status updates are no longer supported. Use revisions instead.',
-      });
+            const db = jest.fn();
+            db.mockImplementation((table: string) => {
+                if (table === "documents") {
+                    return { where: () => ({ first: () => thenable(mockNewDoc) }) };
+                }
+                // revisions
+                return { where: () => thenable(mockRevisions), insert: () => thenable(undefined) };
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await addToQueue(mockRequest as Request, mockResponse as Response);
+
+            expect(insertGetId).toHaveBeenCalledWith(db, "documents", { name: "test.pdf" });
+            expect(notifyNewItem).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
+            expect(mockStatus).toHaveBeenCalledWith(201);
+            expect(mockJson).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
+        });
+
+        it("should return 400 if filename is missing", async () => {
+            mockRequest = { body: {} };
+
+            await addToQueue(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(400);
+            expect(mockJson).toHaveBeenCalledWith({ error: "Filename is required" });
+        });
     });
-  });
+
+    describe("updateStatus", () => {
+        it("should return 410 Gone as status updates are deprecated", async () => {
+            mockRequest = { params: { id: "1" }, body: { status: "in-progress" } };
+
+            await updateStatus(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(410);
+            expect(mockJson).toHaveBeenCalledWith({
+                error: "Status updates are no longer supported. Use revisions instead.",
+            });
+        });
+    });
 });
