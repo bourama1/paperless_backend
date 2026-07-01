@@ -48,19 +48,17 @@ app.use(express.urlencoded({ limit: "100mb", extended: true }));
 app.use(morgan("dev"));
 
 // Static files for PDFs
-const STORAGE_PATH = process.env.STORAGE_PATH || path.join(__dirname, "../storage");
+const STORAGE_PATH = process.env.STORAGE_PATH || path.join(process.cwd(), "storage");
 if (!fs.existsSync(STORAGE_PATH)) {
     fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
 
-const UPLOADS_PATH = path.join(__dirname, "../uploads");
+const UPLOADS_PATH = path.join(process.cwd(), "uploads");
 if (!fs.existsSync(UPLOADS_PATH)) {
     fs.mkdirSync(UPLOADS_PATH, { recursive: true });
 }
 
 app.use("/files", express.static(STORAGE_PATH));
-
-// Routes
 app.use("/queue", queueRoutes);
 app.use("/files", filesRoutes);
 app.use("/workstations", workstationRoutes);

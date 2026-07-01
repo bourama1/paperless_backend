@@ -128,12 +128,21 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
     }
 };
 
-const DOCUMENT_TYPES = {
-    DECLARATION_CONFORMITY: 4,
-    DECLARATION_PERFORMANCE: 5,
-    PBOM_HARDWARE: 14,
-    CONFIRMATION: 21,
+const DOC_TYPE_NAMES: Record<number, string> = {
+    4: "DeclarationOfConformity",
+    5: "DeclarationOfPerformance",
+    14: "PBOM_Hardware",
 };
+
+const DOC_TYPES_TO_PRINT: number[] = (() => {
+    const raw = process.env.DOC_TYPES_TO_PRINT || "14,4,5";
+    return raw
+        .split(",")
+        .map((s) => parseInt(s.trim(), 10))
+        .filter((n) => !isNaN(n));
+})();
+
+const DEFAULT_DOC_TYPE: number = DOC_TYPES_TO_PRINT[0] ?? 14;
 
 async function handleOrderFinished(order: OrderUpdate["order"]) {
     console.log(`Order ${order._id} (${order.productOrder}) finished at ${order.workplace}. Fetching documents...`);
@@ -141,21 +150,12 @@ async function handleOrderFinished(order: OrderUpdate["order"]) {
     try {
         const docsToPrint: string[] = [];
 
-        const pbomHardwareDocs = await fetchDocumentsByType(order, DOCUMENT_TYPES.PBOM_HARDWARE);
-        docsToPrint.push(...pbomHardwareDocs);
-        console.log(`Found ${pbomHardwareDocs.length} PBOM Hardware documents`);
-
-        const declConformity = await fetchDocumentsByType(order, DOCUMENT_TYPES.DECLARATION_CONFORMITY);
-        docsToPrint.push(...declConformity);
-        console.log(`Found ${declConformity.length} Declarations of Conformity`);
-
-        const declPerformance = await fetchDocumentsByType(order, DOCUMENT_TYPES.DECLARATION_PERFORMANCE);
-        docsToPrint.push(...declPerformance);
-        console.log(`Found ${declPerformance.length} Declarations of Performance`);
-
-        const confirmations = await fetchDocumentsByType(order, DOCUMENT_TYPES.CONFIRMATION);
-        docsToPrint.push(...confirmations);
-        console.log(`Found ${confirmations.length} Confirmation documents`);
+        for (const docType of DOC_TYPES_TO_PRINT) {
+            const docs = await fetchDocumentsByType(order, docType);
+            docsToPrint.push(...docs);
+            const name = DOC_TYPE_NAMES[docType] || `Type${docType}`;
+            console.log(`Found ${docs.length} ${name} documents`);
+        }
 
         await triggerPrinting(docsToPrint, order);
     } catch (error) {
@@ -204,7 +204,7 @@ export interface PbomSearchResult {
 }
 
 export const importDocument = async (req: PbomImportRequest) => {
-    const docType = req.documentType || DOCUMENT_TYPES.PBOM_HARDWARE;
+    const docType = req.documentType || DEFAULT_DOC_TYPE;
 
     const fetchUrl = `${DOC_MANAGER_URL}/api/documents/fetch`;
 
@@ -263,7 +263,7 @@ export const searchPbom = async (orderCode: string): Promise<PbomSearchResult[]>
                     params: {
                         order_code: matchingOrder,
                         position_code: pos,
-                        document_type: DOCUMENT_TYPES.PBOM_HARDWARE,
+                        document_type: DEFAULT_DOC_TYPE,
                     },
                     timeout: 5000,
                 });
