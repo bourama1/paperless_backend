@@ -1,15 +1,9 @@
 import knex, { Knex } from "knex";
-import path from "path";
 import dotenv from "dotenv";
-import fs from "fs";
 
 dotenv.config();
 
 let db: Knex | null = null;
-
-function getDbType(): "sqlite" | "postgres" {
-    return (process.env.DB_TYPE as "sqlite" | "postgres") || "sqlite";
-}
 
 export async function insertGetId<T extends Record<string, any>>(
     targetDb: Knex,
@@ -27,34 +21,17 @@ export async function insertGetId<T extends Record<string, any>>(
 export const getDb = async () => {
     if (db) return db;
 
-    const dbType = getDbType();
-
-    if (dbType === "postgres") {
-        db = knex({
-            client: "pg",
-            connection: {
-                host: process.env.PG_HOST || "localhost",
-                port: parseInt(process.env.PG_PORT || "5432", 10),
-                database: process.env.PG_DATABASE || "paperless",
-                user: process.env.PG_USER || "postgres",
-                password: process.env.PG_PASSWORD || "",
-            },
-            pool: { min: 0, max: 10 },
-        });
-    } else {
-        const dbPath = process.env.DATABASE_URL || "./data/database.sqlite";
-        const dbDir = path.dirname(dbPath);
-
-        if (!fs.existsSync(dbDir)) {
-            fs.mkdirSync(dbDir, { recursive: true });
-        }
-
-        db = knex({
-            client: "sqlite3",
-            connection: { filename: dbPath },
-            useNullAsDefault: true,
-        });
-    }
+    db = knex({
+        client: "pg",
+        connection: {
+            host: process.env.PG_HOST || "localhost",
+            port: parseInt(process.env.PG_PORT || "5432", 10),
+            database: process.env.PG_DATABASE || "paperless",
+            user: process.env.PG_USER || "postgres",
+            password: process.env.PG_PASSWORD || "",
+        },
+        pool: { min: 0, max: 10 },
+    });
 
     await setupDatabase(db);
     return db;
@@ -109,7 +86,23 @@ const setupDatabase = async (targetDb: Knex) => {
         });
     }
 
-    // 5. Migration from legacy 'queue' table
+    // 5. label_print_log table
+    if (!(await targetDb.schema.hasTable("label_print_log"))) {
+        await targetDb.schema.createTable("label_print_log", (table) => {
+            table.increments("id").primary();
+            table.string("order_id").notNullable();
+            table.string("sales_order").notNullable();
+            table.string("position").notNullable();
+            table.string("label_type").notNullable();
+            table.string("package_part").notNullable();
+            table.string("package_type").notNullable();
+            table.string("toors_barcode");
+            table.integer("copies").notNullable().defaultTo(1);
+            table.timestamp("printed_at").defaultTo(targetDb.fn.now());
+        });
+    }
+
+    // 6. Migration from legacy 'queue' table
     const hasQueue = await targetDb.schema.hasTable("queue");
     if (hasQueue) {
         console.log("Migrating existing queue table to documents/revisions...");
@@ -131,7 +124,7 @@ const setupDatabase = async (targetDb: Knex) => {
         console.log("Migration complete.");
     }
 
-    // 6. Ensure 'annotations' column exists in 'revisions'
+    // 7. Ensure 'annotations' column exists in 'revisions'
     const hasAnnotations = await targetDb.schema.hasColumn("revisions", "annotations");
     if (!hasAnnotations) {
         console.log("Adding annotations column to revisions table...");

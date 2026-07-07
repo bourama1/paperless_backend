@@ -10,7 +10,10 @@ const DOC_MANAGER_URL = process.env.DOC_MANAGER_URL || "http://tocz-app4:5200";
 const EDITED_PDF_PATH = process.env.EDITED_PDF_PATH || "";
 const STORAGE_PATH = process.env.STORAGE_PATH || "./storage";
 
+// ── helpers ─────────────────────────────────────────────────────────────────
+
 function parseDocmgrRef(ref: string) {
+    // docmgr://{order_code}/{position_code}/{docType}
     const m = ref.match(/^docmgr:\/\/([^/]+)\/([^/]+)\/(\d+)$/);
     if (!m) return null;
     return {
@@ -22,14 +25,19 @@ function parseDocmgrRef(ref: string) {
 
 async function resolveDocumentStream(documentId: number): Promise<{ stream: Readable; filename: string } | null> {
     const db = await getDb();
-    const doc = await db("documents").where("id", documentId).first();
+    const doc = await db("documents").where({ id: documentId }).first();
     if (!doc) return null;
 
-    const latestRev = await db("revisions").where("document_id", documentId).orderBy("version", "desc").first();
+    const latestRev = await db("revisions")
+        .select("filename", "version")
+        .where({ document_id: documentId })
+        .orderBy("version", "desc")
+        .first();
     if (!latestRev) return null;
 
     const ref = latestRev.filename;
 
+    // docmgr:// reference → fetch from doc_manager
     const parsed = parseDocmgrRef(ref);
     if (parsed) {
         const url = `${DOC_MANAGER_URL}/api/documents/fetch`;
@@ -48,6 +56,7 @@ async function resolveDocumentStream(documentId: number): Promise<{ stream: Read
         };
     }
 
+    // Legacy local file reference (imported before switch to docmgr://)
     const localPath = path.join(STORAGE_PATH, ref);
     if (fs.existsSync(localPath)) {
         return { stream: fs.createReadStream(localPath), filename: ref };
@@ -55,6 +64,8 @@ async function resolveDocumentStream(documentId: number): Promise<{ stream: Read
 
     return null;
 }
+
+// ── exports ──────────────────────────────────────────────────────────────────
 
 export const getWorkstations = async (req: Request, res: Response) => {
     try {
@@ -138,13 +149,11 @@ export const getWorkstationLog = async (req: Request, res: Response) => {
         const db = await getDb();
         const { workstation, limit } = req.query;
 
-        let query = db("workstation_log");
+        let query = db("workstation_log").orderBy("created_at", "desc");
 
         if (workstation) {
-            query = query.where("workstation_name", workstation as string);
+            query = query.where({ workstation_name: workstation as string });
         }
-
-        query = query.orderBy("created_at", "desc");
 
         if (limit) {
             query = query.limit(parseInt(limit as string, 10));
@@ -184,16 +193,15 @@ export const renderDocument = async (req: Request, res: Response) => {
 
 async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
     const db = await getDb();
-    const doc = await db("documents").where("id", documentId).first();
+    const doc = await db("documents").where({ id: documentId }).first();
     if (!doc) throw new Error("Document not found");
 
     const editCountResult = await db("revisions")
-        .where("document_id", documentId)
-        .whereNot("filename", "like", "docmgr://%")
+        .where({ document_id: documentId })
+        .andWhereNot("filename", "like", "docmgr://%")
         .count("* as count")
         .first();
-    const editCount = Number((editCountResult as any)?.count || 0);
-    const editRev = editCount + 1;
+    const editRev = (Number(editCountResult?.count) || 0) + 1;
 
     const ext = path.extname(doc.name);
     let base = path.basename(doc.name, ext);
