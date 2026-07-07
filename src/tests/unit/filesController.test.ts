@@ -83,7 +83,7 @@ describe("Files Controller", () => {
 
             const docWhereFirst = { where: () => ({ first: () => thenable(mockDoc) }) };
             const revWhereOrderFirst = {
-                where: () => ({ orderBy: () => ({ first: () => thenable(mockLatestRevision) }) }),
+                select: () => ({ where: () => ({ orderBy: () => ({ first: () => thenable(mockLatestRevision) }) }) }),
             };
             const revInsert = { insert: () => thenable(undefined) };
             const docUpdate = { where: () => ({ update: () => thenable(undefined) }) };

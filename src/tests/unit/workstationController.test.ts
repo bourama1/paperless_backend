@@ -378,8 +378,10 @@ describe("Workstation Controller", () => {
           return { where: () => ({ first: () => thenable(mockDoc) }) };
         }
         return {
-          where: () => ({
-            orderBy: () => ({ first: () => thenable(mockRev) }),
+          select: () => ({
+            where: () => ({
+              orderBy: () => ({ first: () => thenable(mockRev) }),
+            }),
           }),
         };
       });
@@ -452,7 +454,7 @@ describe("Workstation Controller", () => {
       })
         .mockReturnValueOnce({
           where: () => ({
-            whereNot: () => ({
+            andWhereNot: () => ({
               count: () => ({ first: () => thenable(mockCountResult) }),
             }),
           }),

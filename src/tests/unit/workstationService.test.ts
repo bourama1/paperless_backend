@@ -166,25 +166,20 @@ describe("Workstation Service", () => {
       };
       (axios.get as jest.Mock).mockResolvedValue(mockHeadResponse);
 
-      const db = jest.fn();
-      db.mockImplementation((table: string) => {
-        if (table === "documents") {
-          return {
-            where: () => ({
-              first: () => thenable({ id: 1, name: "test.pdf" }),
-            }),
-          };
-        }
-        if (table === "revisions") {
-          return {
-            where: () => ({ orderBy: () => thenable([{ id: 1, version: 1 }]) }),
-            insert: () => thenable(undefined),
-          };
-        }
-        return {};
+      const db = Object.assign(jest.fn(), {
+        fn: { now: jest.fn(() => "CURRENT_TIMESTAMP") },
       });
+      db.mockReturnValueOnce({
+        insert: () => ({ returning: () => [1] }),
+      })
+        .mockReturnValueOnce({ insert: () => thenable(undefined) })
+        .mockReturnValueOnce({
+          where: () => ({ first: () => thenable({ id: 1, name: "test.pdf" }) }),
+        })
+        .mockReturnValueOnce({
+          where: () => ({ orderBy: () => thenable([{ id: 1, version: 1 }]) }),
+        });
       (getDb as jest.Mock).mockResolvedValue(db);
-      (insertGetId as jest.Mock).mockResolvedValue(1);
 
       const result = await importDocument({
         projectNumber: "PN-001",

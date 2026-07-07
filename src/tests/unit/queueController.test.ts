@@ -67,21 +67,23 @@ describe("Queue Controller", () => {
             const mockNewDoc = { id: 1, name: "test.pdf" };
             const mockRevisions = [{ id: 1, document_id: 1, filename: "test.pdf", version: 1 }];
 
-            (insertGetId as jest.Mock).mockResolvedValue(1);
-
             const db = jest.fn();
-            db.mockImplementation((table: string) => {
-                if (table === "documents") {
-                    return { where: () => ({ first: () => thenable(mockNewDoc) }) };
-                }
-                // revisions
-                return { where: () => thenable(mockRevisions), insert: () => thenable(undefined) };
-            });
+            db.mockReturnValueOnce({
+                insert: () => ({ returning: () => [1] }),
+            })
+                .mockReturnValueOnce({ insert: () => thenable(undefined) })
+                .mockReturnValueOnce({
+                    where: () => ({ first: () => thenable(mockNewDoc) }),
+                })
+                .mockReturnValueOnce({
+                    where: () => thenable(mockRevisions),
+                });
             (getDb as jest.Mock).mockResolvedValue(db);
 
             await addToQueue(mockRequest as Request, mockResponse as Response);
 
-            expect(insertGetId).toHaveBeenCalledWith(db, "documents", { name: "test.pdf" });
+            expect(db).toHaveBeenCalledWith("documents");
+            expect(db).toHaveBeenCalledWith("revisions");
             expect(notifyNewItem).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
             expect(mockStatus).toHaveBeenCalledWith(201);
             expect(mockJson).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
