@@ -17,171 +17,258 @@ Production system
       ▼
 handleOrderUpdate()                    (workstationService.ts)
       │
-      ├─► logs to workstation_log
-      │
       └─► handleLabelPrinting()        (labelPrintingService.ts)
               │
-              ├─ 1. Reads CSV:  \\TOCZ-FS2\510-TOCZ\...\Štítky\{salesOrder} {pos}0.csv
-              ├─ 2. Filters rows to this cycle (door) only
-              ├─ 3. Generates EZPL for each row (label type → template/copies/cycleFilter)
-              ├─ 4. Sends EZPL to Godex EZ2250i via UNC copy (\\tocz2420311\GodexEZ2250i)
-              ├─ 5. Logs each print to label_print_log (duplicate guard)
-              └─ 6. On the LAST cycle only: prints QR install-guide sticker
+              ├─ 1. Reads CSV:  \\TOCZ-FS2\...\Štítky\{salesOrder} {pos}0.csv
+              ├─ 2. Matches barcode prefix against parametry config
+              │     → builds Map<type, {copies, cycleFilter}> of ALL matching types
+              ├─ 3. Filters CSV rows to types present in parametry match map
+              ├─ 4. Applies cycle filter per type (first/last/all)
+              ├─ 5. Generates EZPL for each row × copies (correct template per type)
+              ├─ 6. Sends raw EZPL bytes to Godez EZ2250i (TCP port 9100)
+              ├─ 7. Logs each print to label_print_log (duplicate guard)
+              └─ 8. On the LAST cycle only: prints QR install-guide sticker
                     (reads TMP*.TXT, maps rail type → PNG, prints via PowerShell)
 ```
 
-Each door in a multi-door order (e.g. 20 garage doors on one position) is a
-separate API call with its own `cycleIndex`/`totalCycles`. The backend prints
-only what belongs to that specific door, at the moment it's produced —
-exactly mirroring what the Excel macro did per barcode scan, just without a
-human doing the scanning.
+Each door in a multi-door order is a separate API call with its own
+`cycleIndex`/`totalCycles`. The backend prints only what belongs to that
+specific cycle — exactly mirroring what the Excel macro did per barcode scan.
 
 ---
 
 ## 2. What's already done
 
-- [x] CSV file discovery and parsing (verified against real CSV samples)
-- [x] Label type → template / copy count / cycle-filter config (read directly
-      from the real `parametry` sheet in `hardware.xlsm`)
-- [x] EZPL label generation (verified against a real captured `.prn` output)
-- [x] Cycle/door filtering logic (`packageType` door number + `cycleFilter`)
-- [x] Duplicate-print guard (`label_print_log` table)
+- [x] CSV file reading from the production network share (UNC path in `.env`)
+- [x] **Per-row parametry matching** — for a given barcode, builds a
+      `Map<type, {copies, cycleFilter}>` from ALL parametry entries whose
+      `scanB`/`scanC` matches the barcode prefix; filters CSV rows to only the
+      matching types (confirmed identical to VBA behavior)
+- [x] **Cycle filter** — `cycleFilterFromLastCycleNum()` maps parametry `K`
+      column ("0" → "last", "1" → "first", empty → "all") to match VBA's
+      `Right(nactenyKodCely, 1)` comparison
+- [x] **Template selection** — `resolveConfig()` selects `aktualniCMDinter`
+      template for `*_hw_kr` and `t10_struct` types, `aktualniCMD` for all
+      others (confirmed identical to VBA `hlavni()`)
+- [x] **EZPL generation** — `generateSimpleBlock()` for `aktualniCMDinter`
+      template (sheet7 rows 1–42) and `generatePrimaryBlock()` for
+      `aktualniCMD` (sheet6 rows 1–47/86), both verified byte-identical
+      against real Excel `.prn` output
+- [x] **No door number filtering** — removed because VBA does NOT filter by
+      door number (the `V - 1/2` column); all matching CSV rows for a cycle
+      print regardless of door
 - [x] Country code resolution (`DE|Germany` → `DE`, with JSON fallback file)
-- [x] Windows-native printing (`copy /b file.prn \\tocz2420311\GodexEZ2250i`)
+- [x] Windows-native printing (`copy /b file.prn \\tocz2420311\GodezEZ2250i`)
 - [x] QR sticker logic ported from VBA (`TiskQRKodu`)
-- [x] Full migration to PostgreSQL (Knex query builder everywhere, no more
-      raw SQLite calls anywhere in the codebase)
-- [x] `section` copies = 4 **confirmed correct** by you
+- [x] Full migration to PostgreSQL (Knex query builder everywhere)
+- [x] **45 config entries** in `label-type-config.json` (columns A–K from
+      `parametry` sheet)
+- [x] **OUTSIDE EU block** — `generateOutsideEuBlock()` and `needsOutsideEuLabel()`;
+      when `countryAddress` starts with a non-EU 2-letter code + space, the VBA
+      copies rows 48–86 (OUTSIDE EU template) after the full label. The backend
+      now concatenates both blocks in `generateEzpl()`.
+- [x] **10/10 tests pass byte-identical** — all 10 test barcodes produce
+      byte-identical `.prn` output (after LF normalization) compared to VBA.
+      The barcodes cover EU and non-EU addresses, single/multi-label, and
+      various label types.
+
+### Byte-identical verification
+
+All 10 test barcodes in `test-fixtures/test-cases.json` produce **byte-identical**
+`.prn` output (after LF normalization) against the VBA macro. The only
+difference is LF (backend) vs CRLF (VBA) line endings, which the printer
+treats identically.
+
+To run the comparison:
+
+```bash
+scripts\run-test.bat -KeepFiles
+```
+
+Output lands in `test-fixtures/output/{barcode}_backend.prn` and
+`{barcode}_excel.prn` for manual inspection or visualization.
 
 ---
 
-## 3. TODO before going live
+## 3. Test scripts
 
-### 3.1 Infrastructure / access (must-do, blocks everything)
+### `scripts/test-label-preview.ts` (recommended)
+
+Dry-run that shows exactly what would print — read the output, don't guess.
+
+```bash
+npx ts-node scripts/test-label-preview.ts
+```
+
+Reads barcodes from `test-fixtures/test-cases.json`, auto-derives sales
+order/position/cycle index, and prints a detailed per-type/per-cycle
+breakdown:
+
+```
+Parametry shoda: 20 typů
+Shodné CSV řádky: 6
+  t25_hw_kr    4 řádků × 1 kopií =  4 labelů  (cycleFilter=last)
+  motor        2 řádků × 1 kopií =  2 labelů  (cycleFilter=first)
+
+─── Cyklus 2/2 ───
+t25_hw_kr    aktualniCMDinter  4 řádků × 1x = 4 labelů
+  · K - 1/2  V - 1/2  PACHEINER
+  · K - 2/2  V - 1/2  PACHEINER
+  · K - 1/2  V - 2/2  PACHEINER
+  · K - 2/2  V - 2/2  PACHEINER
+CELKEM: 4 labelů
+
+─── Přehled všech cyklů ───
+Cyklus 1/2: 2 labelů (motor)
+Cyklus 2/2: 4 labelů (t25_hw_kr)
+Celkem: 6 labelů
+```
+
+### `scripts/generate-full-prn.ts`
+
+Generates a complete `.prn` file (all cycles, all copies) for verification:
+
+```bash
+npx ts-node scripts/generate-full-prn.ts
+```
+
+Output goes to `test-fixtures/output/{salesOrder}_full.prn`.
+
+### `scripts/Compare-VbaAndBackend.ps1`
+
+Runs the VBA macro from `hardware_test.xlsm` AND the backend on the same
+barcode, then byte-compares the `.prn` output:
+
+```bash
+# All test barcodes (output files kept)
+.\scripts\Compare-VbaAndBackend.ps1 -KeepFiles
+
+# Single barcode
+.\scripts\Compare-VbaAndBackend.ps1 -Barcode 'K"žSV" 603684 010' -KeepFiles
+```
+
+Output files are saved to `test-fixtures/output/{barcode}_excel.prn` and
+`{barcode}_backend.prn` for manual inspection.
+
+### `scripts/run-test.bat`
+
+Thin wrapper around `Compare-VbaAndBackend.ps1` that forwards all arguments:
+
+```bash
+scripts\run-test.bat -KeepFiles
+```
+
+### `scripts/build-exe.bat`
+
+Compiles TypeScript and bundles everything into a standalone `.exe` using
+`@yao-pkg/pkg` (no Node.js required on the target server):
+
+```bash
+.\scripts\build-exe.bat
+```
+
+Output: `publish/paperless-backend.exe` (~127 MB) + `config/` + `.env.example`
+
+### Adding test barcodes
+
+Just add the full barcode string to `test-fixtures/test-cases.json`:
+
+```json
+[
+  "K\"žSV\" 603684 010",
+  "K\"žSV\" 603684 011",
+  "K\"žSVV 234267 010"
+]
+```
+
+The scripts auto-parse `salesOrder`, `position`, and `lastDigit`
+(→ `cycleIndex` = last digit "0" → last cycle, "1" → first cycle).
+
+### CSV test fixtures
+
+Reads CSV from the **production network share** defined in `.env`. No local
+copies needed. If the share is unreachable, the error message tells you what
+to do.
+
+---
+
+## 4. TODO before going live
+
+### 4.1 Infrastructure / access (must-do, blocks everything)
 
 - [ ] Confirm the Windows Server this runs on can reach:
-  - [ ] `\\TOCZ-FS2\510-TOCZ\300 Departments\999 Common\01-FFS-Test\Štítky` (CSV files)
-  - [ ] `\\TOCZ-FS2\510-TOCZ\300 Departments\300 Technical Services\Dokumentace B\NACTENO` (TMP files)
-  - [ ] `\\tocz2420311\GodexEZ2250i` (printer share)
-- [ ] Confirm the Windows account running the Node process has read access to
-      the above shares (same access the Excel user account already has)
+  - [ ] `\\TOCZ-FS2\...\Štítky` (CSV files — already confirmed by test scripts)
+  - [ ] `\\TOCZ-FS2\...\NACTENO` (TMP files)
+  - [ ] `\\tocz2420311\GodezEZ2250i` (printer share)
+- [ ] Confirm the Windows account running the process has read access to
+      the above shares
 - [ ] Create the PostgreSQL database and confirm connection:
 
   ```bash
   createdb paperless
   ```
 
-- [ ] Set every value in `.env` — see section 5 below for the full list and
-      what each one needs to point to
+- [ ] Set every value in `.env` — see section 6 below for the full list
 
-### 3.2 Content that must be supplied by you
+### 4.2 Content that must be supplied by you
 
 - [ ] **QR PNG images** — place all 18 rail-type PNGs (`Indy_SL.png`,
       `Guardy_SL.png`, `GTR_HL.png`, etc. — see `QR_CODE_MAP` in
-      `labelPrintingService.ts` for the full list of expected filenames) in
-      the folder pointed to by `LABEL_QR_IMAGES_PATH`
+      `labelPrintingService.ts` for the full list) in the folder pointed
+      to by `LABEL_QR_IMAGES_PATH`
 - [ ] **Country code additions** — `config/country-codes.json` has ~70
-      countries pre-filled from your list; add any new ones as they appear
-      in production (the server logs a warning naming the exact unknown value)
+      countries pre-filled; add any new ones that appear in production
 
-### 3.3 Verification still needed (known unknowns)
+### 4.3 Verification still needed
 
-These were built from reading the VBA macro and the `parametry` sheet, but
-have **not yet been checked against real printed output**:
+- [ ] **Test more barcode prefixes** — SVV (van Wijk), SVM (PACHEINER, ULLA),
+      and any others from production. Add their barcodes to
+      `test-cases.json`, run the preview script, and confirm the parametry
+      matches and cycle filter assignments are correct
+- [ ] **Multi-cycle orders with mixed cycleFilters** — confirm types with
+      `cycleFilter=first` only appear on cycle 1, `cycleFilter=last` only on
+      the final cycle, and `cycleFilter=all` on every cycle
+- [ ] **QR sticker logic end-to-end** — the `TMP*.TXT` file parsing, rail
+      type lookup, and `PocetVrat`/`CenovaSkupina` extraction were inferred
+      from VBA code but never tested against a real TMP file
+- [ ] **`t29_*` Databaze.xlsx** — the original VBA writes to a separate
+      `Databaze.xlsx` on the network share for `t29_*` types. This is **not
+      implemented**. Confirm if still needed and what the file structure is
 
-- [ ] **`aktualniCMDinter` template layout** (used for all `*_hw_kr` label
-      types) — we only ever captured real `.prn` output for `aktualniCMD`.
-      The `hw_kr` layout currently reuses the same field-generation code,
-      which is a reasonable guess but unverified. Recommend capturing a real
-      `.prn` for a `hw_kr` label the same way we did for `aktualniCMD` (open
-      Excel, fill dummy data, Save As → Text Printer format) and comparing.
-- [ ] **QR sticker logic end-to-end** — the `TMP*.TXT` file parsing
-      (`parseTmpFile`), the `6210610` rail-type lookup, and the
-      `PocetVrat`/`CenovaSkupina` extraction were all inferred from the VBA
-      code, never tested against a real TMP file. Get one real `TMP*.TXT`
-      sample and verify the parser extracts the right rail type and door
-      count.
-- [ ] **`t29_*` special case** — the original macro updates a separate
-      `Databaze.xlsx` file on the network share for `t29_*` label types.
-      This is **not implemented** at all currently. Confirm whether this
-      still matters for your product line, and if so, what that Databaze
-      file's structure looks like.
+### 4.4 Live testing checklist
 
----
-
-## 4. Testing checklist
-
-### 4.1 Dry-run testing (no printer/PNG paths configured)
-
-With `LABEL_PRINTER_UNC_PATH`, `LABEL_PRINTER_HOST`, and `LABEL_QR_IMAGES_PATH`
-all left blank, the service logs everything it *would* print instead of
-actually printing. Do this first, always.
-
-- [ ] Send a real `/order-update` payload (STARTED, `cycleIndex: 1`,
-      `totalCycles: 1`) for a simple single-door order and confirm the
-      `[LABELS] [DRY RUN]` log lines match what Excel would have printed for
-      that position
-- [ ] Send a real payload for a **multi-door** order (`totalCycles > 1`) and
-      confirm:
-  - [ ] Cycle 1 only prints door-1 rows (correct `packageType` filtering)
-  - [ ] `cycleFilter: 'first'` types (e.g. `motor`) only appear on cycle 1
-  - [ ] `cycleFilter: 'last'` types (e.g. `moutings`, `*_hw_kr`) only appear
-        on the final cycle
-  - [ ] `section` prints with 4 copies logged per row
-- [ ] Send the **same** payload twice and confirm the second run logs
-      `SKIP already printed` for every row (duplicate guard working)
-- [ ] Check the `[QR]` log output only fires when `cycleIndex === totalCycles`
-
-### 4.2 Manual connectivity testing (before wiring up the full flow)
-
-- [ ] From the Windows Server, manually test the printer share:
-
-  ```cmd
-  echo test > test.prn
-  copy /b test.prn \\tocz2420311\GodexEZ2250i
-  ```
-
-- [ ] Manually browse to the CSV share and TMP files share in File Explorer
-      to confirm read access
-- [ ] Manually print one QR PNG via PowerShell to confirm the default
-      printer picks it up correctly:
-
-  ```powershell
-  Start-Process -FilePath "C:\path\to\Guardy_SL.png" -Verb Print
-  ```
-
-### 4.3 Live testing (printer configured, real labels coming out)
-
-- [ ] Pick **one low-stakes real order** and run it through the full
-      pipeline with the printer configured
-- [ ] Physically compare the printed label side-by-side against what Excel
-      would have printed for the same barcode/CSV row — check:
-  - [ ] Barcode positions and readability
+- [ ] Pick **one real order** and run through the full pipeline with printer
+- [ ] Physically compare printed label against what Excel would print:
+  - [ ] Barcode position and readability
   - [ ] Sales order / position numbers
-  - [ ] Customer name/address text placement and truncation
-      (long names split across two lines — check the split point looks right)
+  - [ ] Customer name text placement and truncation
   - [ ] Country code
-  - [ ] Package part / package type text
-- [ ] Test a multi-door order start to finish and confirm each door's
-      labels physically print at the right moment (i.e. cycle 3 of 5
-      doesn't accidentally print door 5's labels early)
-- [ ] Test the QR sticker prints the correct number of copies
-      (`PocetVrat`) and the correct image for at least 2-3 different rail
-      types
-
-### 4.4 Failure/edge case testing
-
-- [ ] CSV file missing (position not yet exported) — confirm it logs an
-      error and doesn't crash the request
-- [ ] Unknown `deliveryCountry` value — confirm it logs the warning with
-      the exact value so you know what to add to `country-codes.json`
-- [ ] Unknown rail type in TMP file — confirm QR sticker step logs a
-      warning and skips gracefully instead of crashing
-- [ ] Price group `C01` — confirm QR sticker is correctly skipped
+  - [ ] Package part / type text
+- [ ] Test a **multi-door order** start to finish — confirm labels for the
+      correct door print at the correct cycle
+- [ ] Test the QR sticker prints the correct image and `PocetVrat` copies
+- [ ] Test failure modes: missing CSV, unknown country, unknown rail type
 
 ---
 
-## 5. Full `.env` reference
+## 5. VBA behaviour reference
+
+Key findings from reverse-engineering `hardware.xlsm` `hlavni()`:
+
+| Behaviour              | How VBA does it                                                                                                                               | How backend does it                                                                                             |
+| ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| CSV import             | Merge A–E into A, then TextToColumns with `;` → net effect: columns stay split                                                                | Direct semicolon split                                                                                          |
+| Parametry matching     | Iterate parametry, if `scanB`/`scanC` matches barcode prefix, get `type` + `copies` + `lastCycleNum`                                          | Same: build `Map<type, {copies, cycleFilter}>` for all matching types                                           |
+| Cycle filter           | `Right(barcode, 1)` vs `lastCycleNum` ("0" last, "1" first, "" always)                                                                        | `cycleFilterFromLastCycleNum()`                                                                                 |
+| Template choice        | `aktualniCMDinter` for `*_hw_kr`, `aktualniCMD` for everything else (in `hlavni()`, not `tisk()`)                                             | `resolveConfig()` selects same templates                                                                        |
+| Door number filter     | **None** — `tisk()` prints ALL matching CSV rows regardless of door                                                                           | Door filtering removed                                                                                          |
+| Secondary "OUTSIDE EU" | If `countryAddress` has 2-letter non-EU code + space at position 3, VBA copies A1:A86 (full + OUTSIDE EU block); otherwise A1:A47 (full only) | `needsOutsideEuLabel()` checks country code; `generateEzpl()` concatenates `generateOutsideEuBlock()` when true |
+| Printer output         | `ActiveWorkbook.SaveAs xlTextPrinter` → `posliTisk()`                                                                                         | Raw EZPL bytes → TCP socket to Godex                                                                            |
+| Duplicate guard        | Check `Databaze` sheet; if already printed (`Hledej()` match) → skip                                                                          | `label_print_log` DB table                                                                                      |
+
+---
+
+## 6. Full `.env` reference
 
 ```env
 PORT=5300
@@ -208,42 +295,48 @@ LABEL_PRINT_TRIGGER=STARTED
 # UNC path to the Štítky folder (CSV source files)
 LABEL_CSV_BASE_PATH=\\TOCZ-FS2\510-TOCZ\300 Departments\999 Common\01-FFS-Test\Štítky
 
-# Printer connection — UNC method (matches Excel exactly)
-LABEL_PRINTER_UNC_PATH=\\tocz2420311\GodexEZ2250i
-
-# Printer connection — TCP fallback (only used if UNC path above is empty)
+# Printer connection — RAW TCP (IP and port of the Godex EZ2250i)
 LABEL_PRINTER_HOST=
 LABEL_PRINTER_PORT=9100
+
+# Printer connection — UNC method (identical to Excel: copy /b file.prn \\share)
+LABEL_PRINTER_UNC_PATH=\\tocz2420311\GodezEZ2250i
 
 # Optional override of copy count for ALL label types
 # LABEL_PRINTER_COPIES=1
 
 # ── QR sticker printing ───────────────────────────────────────────────────────
 LABEL_TMP_FILES_PATH=\\TOCZ-FS2\510-TOCZ\300 Departments\300 Technical Services\Dokumentace B\NACTENO
-LABEL_COUNTRY_CODES_PATH=            # defaults to config/country-codes.json
-LABEL_QR_IMAGES_PATH=                # folder with Indy_SL.png, Guardy_SL.png, etc.
-LABEL_QR_PRINTER=                    # Windows default printer used if blank
+LABEL_COUNTRY_CODES_PATH=            # defaults to config/country-codes.json next to the .exe
+LABEL_QR_IMAGES_PATH=                # folder with Indy_SL.png, Guardy_SL.png, etc. (empty = dry-run)
+LABEL_QR_PRINTER=                    # IP address (raw TCP port 9100), Windows printer name, or empty = default printer
 ```
 
 ---
 
-## 6. Key files
+## 7. Key files
 
-| File                                   | Purpose                                           |
-| -------------------------------------- | ------------------------------------------------- |
-| `src/services/labelPrintingService.ts` | All label + QR sticker printing logic             |
-| `src/services/workstationService.ts`   | Receives `/order-update`, triggers label printing |
-| `src/config/database.ts`               | PostgreSQL/Knex connection + schema setup         |
-| `config/country-codes.json`            | Country name → 2-letter code fallback mapping     |
+| File                                   | Purpose                                                         |
+| -------------------------------------- | --------------------------------------------------------------- |
+| `src/services/labelPrintingService.ts` | All label + QR sticker printing logic (~1090 lines)             |
+| `src/services/workstationService.ts`   | Receives `/order-update`, triggers label printing               |
+| `src/config/database.ts`               | PostgreSQL/Knex connection + schema setup                       |
+| `config/label-type-config.json`        | 45 parametry entries (columns A–K from `parametry` sheet)       |
+| `config/country-codes.json`            | Country name → 2-letter code fallback mapping                   |
+| `scripts/test-label-preview.ts`        | Dry-run test with per-type/per-cycle breakdown                  |
+| `scripts/generate-full-prn.ts`         | Generate complete .prn files for all test cases                 |
+| `scripts/Compare-VbaAndBackend.ps1`    | VBA vs backend byte-comparison for all test barcodes            |
+| `scripts/build-exe.bat`                | Compile TS + package into standalone paperless-backend.exe      |
+| `scripts/run-test.bat`                 | Thin wrapper around Compare-VbaAndBackend.ps1                   |
+| `test-fixtures/test-cases.json`        | Barcode list for test scripts (just add barcodes)               |
+| `test-fixtures/output/`                | Generated .prn files land here (`*_backend.prn`, `*_excel.prn`) |
+| `hardware_test.xlsm`                   | Modified Excel with VBA macro (for VBA reference testing)       |
 
 ---
 
-## 7. Known limitations (by design, not bugs)
+## 8. Known limitations (by design, not bugs)
 
-- QR sticker printing on Windows always uses the **system default printer**
-  — there's no way to target a specific printer per print job through the
-  `Start-Process -Verb Print` mechanism. If QR stickers need a different
-  printer than labels, set that printer as the Windows default, or this
-  needs a proper native print API implementation later.
 - `LABEL_PRINTER_COPIES` (if set) overrides copy counts for **every** label
   type — it's meant for testing only, not production use.
+- VBA `posliTisk()` fails when called headless via COM (no Excel UI). The
+  backend's direct TCP approach does not have this limitation.

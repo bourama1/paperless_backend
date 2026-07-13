@@ -11,7 +11,10 @@
         "format": "prettier --write \"src/**/*.ts\"",
         "format:check": "prettier --check \"src/**/*.ts\"",
         "test": "jest",
-        "prepare": "husky"
+        "prepare": "husky",
+        "test:preview": "ts-node scripts/test-label-preview.ts",
+        "test:compare": "powershell -ExecutionPolicy Bypass -File scripts/Compare-VbaAndBackend.ps1",
+        "test:generate": "ts-node scripts/generate-full-prn.ts"
     },
     "keywords": [],
     "author": "",
@@ -42,6 +45,7 @@
         "@types/supertest": "^7.2.0",
         "@typescript-eslint/eslint-plugin": "^8.58.2",
         "@typescript-eslint/parser": "^8.58.2",
+        "@yao-pkg/pkg": "^6.21.0",
         "eslint": "^10.2.0",
         "globals": "^17.5.0",
         "husky": "^9.1.7",

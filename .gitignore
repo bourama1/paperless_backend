@@ -1,8 +1,11 @@
 node_modules/
 dist/
-.env
+.env*
 data/
 storage/
 *.log
 eslint.config.d.mts
 eslint.config.*.map
+test-fixtures/output/
+deploy/
+publish/

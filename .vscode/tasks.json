@@ -2,20 +2,66 @@
     "version": "2.0.0",
     "tasks": [
         {
-            "label": "Run Backend Dev",
+            "label": "Test all barcodes",
             "type": "shell",
-            "command": "npm run dev",
-            "group": { "kind": "build", "isDefault": true },
+            "command": "scripts\\run-test.bat -KeepFiles",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
             "problemMatcher": [],
-            "detail": "Run backend with nodemon + ts-node (hot reload)"
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            }
         },
         {
-            "label": "Build Backend",
+            "label": "Test single barcode",
             "type": "shell",
-            "command": "powershell -File build-deploy.ps1",
+            "command": "scripts\\run-test.bat -KeepFiles",
+            "args": ["-Barcode", "${input:barcode}"],
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "presentation": {
+                "reveal": "always",
+                "panel": "dedicated"
+            },
+            "problemMatcher": [],
+            "group": "test"
+        },
+        {
+            "label": "Build backend",
+            "type": "shell",
+            "command": "npm run build",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
             "group": "build",
             "problemMatcher": [],
-            "detail": "TypeScript build → pkg .exe → deploy folder → zip"
+            "detail": "Compile TypeScript to dist/"
+        },
+        {
+            "label": "Build EXE",
+            "type": "shell",
+            "command": "scripts\\build-exe.bat",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "build",
+            "problemMatcher": [],
+            "detail": "Compile TS + create standalone paperless-backend.exe"
+        }
+    ],
+    "inputs": [
+        {
+            "id": "barcode",
+            "type": "promptString",
+            "description": "Enter barcode (e.g. K\"žSV\" 603684 010)",
+            "default": "K\"žSV\" 603684 010"
         }
     ]
 }
