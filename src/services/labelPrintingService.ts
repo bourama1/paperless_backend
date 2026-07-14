@@ -104,7 +104,8 @@ const WORKPLACE_TO_SCAN_PREFIX: Record<string, string> = {
     hardware: SCAN_PREFIX.HARDWARE,
     predmontazoptolisty: SCAN_PREFIX.HARDWARE,
 
-    predpripravahridele: SCAN_PREFIX.KRIDLO, // "PredHridel" in production logs
+    predpripravahridele: SCAN_PREFIX.KRIDLO, // full Czech name
+    predhridel: SCAN_PREFIX.KRIDLO, // "PredHridel" as logged by production
     mandoor: SCAN_PREFIX.KRIDLO,
     "2kv": SCAN_PREFIX.KRIDLO,
     balirnakridlo: SCAN_PREFIX.KRIDLO,
@@ -347,14 +348,17 @@ export function resolveConfig(labelType: string): LabelTypeConfig {
 
 /**
  * Builds the CSV path exactly as the VBA macro did:
- *   pozice = last 3 chars of barcode → first 2 + "0"
+ *   pozice = Left(Right(barcode, 3), 2) & "0"
  *   file   = prodejniObjednavka & " " & pozice & ".csv"
  *
+ * The API sends position as the numeric value of the VBA's 3-digit pozice
+ * (e.g. VBA pozice = "010" → API sends "10"). We simply pad to 3 digits.
+ *
  * From the order payload:
- *   salesOrder "602969", position "30"  →  "602969 300.csv"
+ *   salesOrder "602969", position "300"  →  "602969 300.csv"
  */
 function buildCsvPath(salesOrder: string, position: string): string {
-    const paddedPos = position.padStart(2, "0") + "0";
+    const paddedPos = position.padStart(3, "0");
     return path.join(CSV_BASE_PATH, `${salesOrder} ${paddedPos}.csv`);
 }
 
@@ -1105,6 +1109,13 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
  * Equivalent to VBA: wordDoc.PrintOut repeated PocetVrat times.
  */
 async function printQrPng(pngPath: string, copies: number): Promise<void> {
+    if (!QR_PRINTER) {
+        console.log(
+            `[QR] No printer configured — would print ${copies}x "${pngPath}"`,
+        );
+        return;
+    }
+
     const { execFile } = await import("child_process");
     const { promisify } = await import("util");
     const execFileAsync = promisify(execFile);

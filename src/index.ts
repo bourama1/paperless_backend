@@ -45,6 +45,21 @@ if (process.env.NODE_ENV !== "test") {
 app.use(cors());
 app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ limit: "100mb", extended: true }));
+
+// Log all incoming API requests with their payload
+app.use((req, res, next) => {
+    if (req.body && Object.keys(req.body).length > 0) {
+        let bodyStr = JSON.stringify(req.body);
+        if (bodyStr.length > 2000) bodyStr = bodyStr.substring(0, 2000) + "...";
+        console.log(`[API] ${req.method} ${req.url} ${bodyStr}`);
+    } else if (Object.keys(req.query).length > 0) {
+        console.log(`[API] ${req.method} ${req.url} query=${JSON.stringify(req.query)}`);
+    } else {
+        console.log(`[API] ${req.method} ${req.url}`);
+    }
+    next();
+});
+
 app.use(morgan("dev"));
 
 // Static files for PDFs

@@ -112,13 +112,14 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
             await db("workstations")
                 .where({ name: update.order.workplace })
                 .update({ current_order_id: null, current_order_data: null });
-
-            handleOrderFinished(update.order).catch((err) => console.error("Error handling finished order:", err));
         }
 
-        // Trigger label printing (fires for STARTED or FINISHED depending on
-        // the LABEL_PRINT_TRIGGER env var; non-Hardware workplaces are ignored
-        // inside the service)
+        if (update.action === "STARTED") {
+            // Print documents (PBOM, declarations, confirmations) on STARTED
+            printDocumentsForOrder(update.order).catch((err) => console.error("Error printing documents:", err));
+        }
+
+        // Trigger label printing (filtered by LABEL_PRINT_TRIGGER inside)
         handleLabelPrinting(update).catch((err) => console.error("[LABELS] Error in handleLabelPrinting:", err));
 
         const { io } = require("../index");
@@ -138,8 +139,8 @@ const DOCUMENT_TYPES = {
     CONFIRMATION: 21,
 };
 
-async function handleOrderFinished(order: OrderUpdate["order"]) {
-    console.log(`Order ${order._id} (${order.productOrder}) finished at ${order.workplace}. Fetching documents...`);
+async function printDocumentsForOrder(order: OrderUpdate["order"]) {
+    console.log(`Order ${order._id} (${order.productOrder}) at ${order.workplace}. Fetching documents...`);
 
     try {
         const docsToPrint: string[] = [];
@@ -162,7 +163,7 @@ async function handleOrderFinished(order: OrderUpdate["order"]) {
 
         await triggerPrinting(docsToPrint, order);
     } catch (error) {
-        console.error("Error in handleOrderFinished:", error);
+        console.error("Error in printDocumentsForOrder:", error);
     }
 }
 
@@ -298,20 +299,29 @@ async function triggerPrinting(filePaths: string[], order: OrderUpdate["order"])
         return;
     }
 
-    console.log(
-        `[PRINT] Would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
-    );
-    for (const fp of filePaths) {
-        console.log(`  - ${fp}`);
+    const printerName = process.env.DOCUMENTS_PRINTER_NAME || "";
+
+    if (!printerName) {
+        console.log(
+            `[PRINT] No printer configured — would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
+        );
+        for (const fp of filePaths) {
+            console.log(`  - ${fp}`);
+        }
+        return;
     }
 
-    const { io } = require("../index");
-    if (io) {
-        io.emit("print-documents", {
-            orderId: order._id,
-            productOrder: order.productOrder,
-            workstation: order.workplace,
-            filePaths,
-        });
+    console.log(
+        `[PRINT] Printing ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}) to "${printerName}":`,
+    );
+
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+
+    for (const fp of filePaths) {
+        const psCommand = `Start-Process -FilePath "${fp}" -Verb Print -WindowStyle Hidden`;
+        console.log(`  - ${fp}`);
+        await execFileAsync("powershell.exe", ["-NoProfile", "-Command", psCommand]);
     }
 }

@@ -128,6 +128,31 @@ describe("Workstation Service", () => {
             expect(handleLabelPrinting).toHaveBeenCalledWith(mockUpdate);
         });
 
+        it("should fetch and print documents on STARTED", async () => {
+            (axios.get as jest.Mock).mockResolvedValue({ data: [] });
+            const db = jest.fn();
+            db.mockImplementation((table: string) => {
+                if (table === "workstation_log") {
+                    return { insert: () => thenable(undefined) };
+                }
+                return {};
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await handleOrderUpdate(mockUpdate);
+            await new Promise(process.nextTick);
+
+            expect(axios.get).toHaveBeenCalledWith(
+                expect.stringContaining("/api/documents/fetch"),
+                expect.objectContaining({
+                    params: expect.objectContaining({
+                        order_code: mockOrder.projectNumber,
+                        position_code: mockOrder.position,
+                    }),
+                }),
+            );
+        });
+
         it("should clear workstation on FINISHED action", async () => {
             const finishedUpdate = { ...mockUpdate, action: "FINISHED" as const };
             const db = jest.fn();
@@ -154,7 +179,7 @@ describe("Workstation Service", () => {
             await expect(handleOrderUpdate(mockUpdate)).rejects.toThrow("DB Error");
         });
 
-        it("should look up documents by projectNumber, not salesOrder, on FINISHED", async () => {
+        it("should not fetch or print documents on FINISHED", async () => {
             const finishedUpdate = { ...mockUpdate, action: "FINISHED" as const };
             const db = jest.fn();
             db.mockImplementation((table: string) => {
@@ -167,20 +192,15 @@ describe("Workstation Service", () => {
                 return {};
             });
             (getDb as jest.Mock).mockResolvedValue(db);
-            (axios.get as jest.Mock).mockResolvedValue({ data: [] });
 
             await handleOrderUpdate(finishedUpdate);
-            // handleOrderFinished runs fire-and-forget; flush the microtask queue.
+            // Give fire-and-forget promises a chance to run
             await new Promise(process.nextTick);
 
-            expect(axios.get).toHaveBeenCalledWith(
+            // No document fetches should happen on FINISHED
+            expect(axios.get).not.toHaveBeenCalledWith(
                 expect.stringContaining("/api/documents/fetch"),
-                expect.objectContaining({
-                    params: expect.objectContaining({
-                        order_code: mockOrder.projectNumber,
-                        position_code: mockOrder.position,
-                    }),
-                }),
+                expect.anything(),
             );
         });
     });
