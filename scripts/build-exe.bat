@@ -27,12 +27,14 @@ xcopy /e /i /q "%REPO%\config" "%OUT%\config" >nul
 powershell -Command "Copy-Item -LiteralPath '%REPO%\.env' -Destination '%OUT%\.env.example' -Force" >nul
 
 echo === Step 4: Create zip archive ===
-powershell -Command "$d=(Get-Date -Format 'yyyyMMdd'); $zip='%OUT%\paperless-backend-'+$d+'.zip'; if (Test-Path $zip) { Remove-Item $zip -Force }; Compress-Archive -Path '%OUT%\*' -DestinationPath $zip -Force" >nul
+for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd'"') do set ZIPDATE=%%i
+set ZIPNAME=paperless-backend-%ZIPDATE%.zip
+if exist "%OUT%\%ZIPNAME%" del "%OUT%\%ZIPNAME%"
+powershell -Command "Compress-Archive -Path '%OUT%\*' -DestinationPath '%OUT%\%ZIPNAME%' -Force" >nul
 
 echo.
 echo === Done ===
 echo Output folder: %OUT%
-for /f "delims=" %%z in ('powershell -NoProfile -Command "$d=(Get-Date -Format 'yyyyMMdd'); Write-Output ('paperless-backend-'+$d+'.zip')"') do set ZIPNAME=%%z
 echo Zip archive: %OUT%\%ZIPNAME%
 echo.
 echo To deploy:
