@@ -5,6 +5,11 @@ const sampleCountryCodes = JSON.stringify({
     "czech republic": "CZ",
 });
 
+const sampleParametryConfig = JSON.stringify([
+    { scanB: "", scanC: "PO-001", type: "section", printPrimary: "Ano", printSecondary: "Ne", copies: 4, printMethod: "", lastCycleNum: "" },
+    { scanB: "", scanC: "PO-001", type: "motor", printPrimary: "Ano", printSecondary: "Ne", copies: 1, printMethod: "", lastCycleNum: "1" },
+]);
+
 jest.mock("fs", () => {
     const actual = jest.requireActual("fs");
     return {
@@ -12,6 +17,9 @@ jest.mock("fs", () => {
         readFileSync: jest.fn((...args: any[]) => {
             if (typeof args[0] === "string" && args[0].includes("country-codes.json")) {
                 return sampleCountryCodes;
+            }
+            if (typeof args[0] === "string" && args[0].includes("label-type-config.json")) {
+                return sampleParametryConfig;
             }
             throw new Error("ENOENT: no such file or directory");
         }),
@@ -89,6 +97,7 @@ describe("Label Printing Service", () => {
 
         (fs.readFileSync as jest.Mock).mockImplementation((path: string) => {
             if (path.includes("country-codes.json")) return sampleCountryCodes;
+            if (path.includes("label-type-config.json")) return sampleParametryConfig;
             return sampleCsvContent;
         });
         (fs.existsSync as jest.Mock).mockReturnValue(true);
