@@ -10,7 +10,7 @@
         "lint": "eslint --ext .ts --config eslint.config.mjs src",
         "format": "prettier --write \"src/**/*.ts\"",
         "format:check": "prettier --check \"src/**/*.ts\"",
-        "test": "jest",
+        "test": "jest --forceExit",
         "prepare": "husky",
         "test:preview": "ts-node scripts/test-label-preview.ts",
         "test:compare": "powershell -ExecutionPolicy Bypass -File scripts/Compare-VbaAndBackend.ps1",
