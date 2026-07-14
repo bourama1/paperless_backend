@@ -26,14 +26,20 @@ echo === Step 3: Copy config files ===
 xcopy /e /i /q "%REPO%\config" "%OUT%\config" >nul
 powershell -Command "Copy-Item -LiteralPath '%REPO%\.env' -Destination '%OUT%\.env.example' -Force" >nul
 
+echo === Step 4: Create zip archive ===
+powershell -Command "$d=(Get-Date -Format 'yyyyMMdd'); $zip='%OUT%\paperless-backend-'+$d+'.zip'; if (Test-Path $zip) { Remove-Item $zip -Force }; Compress-Archive -Path '%OUT%\*' -DestinationPath $zip -Force" >nul
+
 echo.
 echo === Done ===
-echo Published to: %OUT%
+echo Output folder: %OUT%
+for /f "delims=" %%z in ('powershell -NoProfile -Command "$d=(Get-Date -Format 'yyyyMMdd'); Write-Output ('paperless-backend-'+$d+'.zip')"') do set ZIPNAME=%%z
+echo Zip archive: %OUT%\%ZIPNAME%
 echo.
 echo To deploy:
-echo   1. Copy publish\ to target server
+echo   1. Copy %OUT%\%ZIPNAME% to target server and unzip
 echo   2. Rename .env.example to .env and edit settings
 echo   3. Run paperless-backend.exe
 echo.
-echo Size: 
-for %%f in ("%OUT%\paperless-backend.exe") do echo   %%~zf bytes (%%~zf / 1048576 = ~%%~zf MB)
+echo Size:
+for %%f in ("%OUT%\paperless-backend.exe") do echo   exe: %%~zf bytes
+for %%f in ("%OUT%\%ZIPNAME%") do echo   zip: %%~zf bytes
