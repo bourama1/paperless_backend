@@ -15,7 +15,7 @@
             "problemMatcher": [],
             "group": {
                 "kind": "test",
-                "isDefault": true
+                "isDefault": false
             }
         },
         {
@@ -32,6 +32,31 @@
             },
             "problemMatcher": [],
             "group": "test"
+        },
+        {
+            "label": "Test",
+            "type": "shell",
+            "command": "npm test",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "problemMatcher": [],
+            "detail": "Run all Jest unit/integration tests"
+        },
+        {
+            "label": "Test: watch",
+            "type": "shell",
+            "command": "npx jest --watch",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "group": "test",
+            "problemMatcher": [],
+            "detail": "Run Jest in watch mode"
         },
         {
             "label": "Build backend",
