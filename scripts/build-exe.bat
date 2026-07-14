@@ -16,7 +16,7 @@ echo === Step 2: Bundle into .exe ===
 if exist "%OUT%" rmdir /s /q "%OUT%"
 mkdir "%OUT%\config" 2>nul
 
-npx pkg dist/index.js --target node24-win-x64 --output "%OUT%\paperless-backend.exe" --no-bytecode --public-packages "*" --public
+call npx pkg dist/index.js --target node24-win-x64 --output "%OUT%\paperless-backend.exe" --no-bytecode --public-packages "*" --public
 set PKG_EXIT=%ERRORLEVEL%
 echo pkg exit code: %PKG_EXIT%
 if %PKG_EXIT% neq 0 (
