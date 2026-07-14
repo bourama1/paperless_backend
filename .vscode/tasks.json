@@ -48,17 +48,6 @@
             "detail": "Run all Jest unit/integration tests"
         },
         {
-            "label": "Test: watch",
-            "type": "shell",
-            "command": "npx jest --watch",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "group": "test",
-            "problemMatcher": [],
-            "detail": "Run Jest in watch mode"
-        },
-        {
             "label": "Build backend",
             "type": "shell",
             "command": "npm run build",

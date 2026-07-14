@@ -19,13 +19,16 @@ handleOrderUpdate()                    (workstationService.ts)
       │
       └─► handleLabelPrinting()        (labelPrintingService.ts)
               │
-              ├─ 1. Reads CSV:  \\TOCZ-FS2\...\Štítky\{salesOrder} {pos}0.csv
-              ├─ 2. Matches barcode prefix against parametry config
+              ├─ 1. Maps order.workplace → scan prefix via WORKPLACE_TO_SCAN_PREFIX
+              │     (gate-level → "K"žSVK", hardware/motor → "K"žSV"", rail → "K"žSVV")
+              ├─ 2. Matches scan prefix against parametry config (scanC column)
               │     → builds Map<type, {copies, cycleFilter}> of ALL matching types
               ├─ 3. Filters CSV rows to types present in parametry match map
-              ├─ 4. Applies cycle filter per type (first/last/all)
+              ├─ 4. Applies cycle filter per type (first/last/all) using real
+              │     cycleIndex/totalCycles (not barcode last-digit heuristic)
               ├─ 5. Generates EZPL for each row × copies (correct template per type)
-              ├─ 6. Sends raw EZPL bytes to Godez EZ2250i (TCP port 9100)
+              ├─ 6. Copies raw EZPL bytes to printer via UNC share
+              │     (copy /b file.prn \\tocz2420311\GodezEZ2250i — same as Excel)
               ├─ 7. Logs each print to label_print_log (duplicate guard)
               └─ 8. On the LAST cycle only: prints QR install-guide sticker
                     (reads TMP*.TXT, maps rail type → PNG, prints via PowerShell)
@@ -40,13 +43,17 @@ specific cycle — exactly mirroring what the Excel macro did per barcode scan.
 ## 2. What's already done
 
 - [x] CSV file reading from the production network share (UNC path in `.env`)
-- [x] **Per-row parametry matching** — for a given barcode, builds a
+- [x] **Workplace → scan-prefix mapping** — `WORKPLACE_TO_SCAN_PREFIX` maps
+      workplace names (gate-level, hardware/motor, rail) to the correct scan
+      prefix; `resolveScanPrefix()` derives the prefix for parametry matching
+      from the order's workplace, not from a scanned barcode
+- [x] **Per-row parametry matching** — for a given scan prefix, builds a
       `Map<type, {copies, cycleFilter}>` from ALL parametry entries whose
-      `scanB`/`scanC` matches the barcode prefix; filters CSV rows to only the
-      matching types (confirmed identical to VBA behavior)
-- [x] **Cycle filter** — `cycleFilterFromLastCycleNum()` maps parametry `K`
-      column ("0" → "last", "1" → "first", empty → "all") to match VBA's
-      `Right(nactenyKodCely, 1)` comparison
+      `scanC` matches the prefix; filters CSV rows to only the matching types
+      (confirmed identical to VBA behavior)
+- [x] **Cycle filter** — uses real `cycleIndex`/`totalCycles` from the
+      `/order-update` payload (not barcode last-digit heuristic); maps
+      parametry `K` column ("0" → "last", "1" → "first", empty → "all")
 - [x] **Template selection** — `resolveConfig()` selects `aktualniCMDinter`
       template for `*_hw_kr` and `t10_struct` types, `aktualniCMD` for all
       others (confirmed identical to VBA `hlavni()`)
@@ -58,7 +65,8 @@ specific cycle — exactly mirroring what the Excel macro did per barcode scan.
       door number (the `V - 1/2` column); all matching CSV rows for a cycle
       print regardless of door
 - [x] Country code resolution (`DE|Germany` → `DE`, with JSON fallback file)
-- [x] Windows-native printing (`copy /b file.prn \\tocz2420311\GodezEZ2250i`)
+- [x] Windows-native printing via UNC (`copy /b file.prn \\share` — identical to
+      Excel's `posliTisk()`), with fallback to TCP raw socket or default printer
 - [x] QR sticker logic ported from VBA (`TiskQRKodu`)
 - [x] Full migration to PostgreSQL (Knex query builder everywhere)
 - [x] **45 config entries** in `label-type-config.json` (columns A–K from
@@ -168,6 +176,7 @@ Compiles TypeScript and bundles everything into a standalone `.exe` using
 ```
 
 Output: `publish/paperless-backend.exe` (~127 MB) + `config/` + `.env.example`
+        + `paperless-backend.zip` with all of the above for easy deployment
 
 ### Adding test barcodes
 
@@ -221,13 +230,13 @@ to do.
 
 ### 4.3 Verification still needed
 
-- [ ] **Test more barcode prefixes** — SVV (van Wijk), SVM (PACHEINER, ULLA),
-      and any others from production. Add their barcodes to
-      `test-cases.json`, run the preview script, and confirm the parametry
-      matches and cycle filter assignments are correct
+- [ ] **Workplace mapping for all production workplaces** — verify the
+      `WORKPLACE_TO_SCAN_PREFIX` mapping covers every workplace name that
+      the production system sends. Add any missing entries.
 - [ ] **Multi-cycle orders with mixed cycleFilters** — confirm types with
       `cycleFilter=first` only appear on cycle 1, `cycleFilter=last` only on
-      the final cycle, and `cycleFilter=all` on every cycle
+      the final cycle, and `cycleFilter=all` on every cycle (uses real
+      `cycleIndex`/`totalCycles` from the API payload)
 - [ ] **QR sticker logic end-to-end** — the `TMP*.TXT` file parsing, rail
       type lookup, and `PocetVrat`/`CenovaSkupina` extraction were inferred
       from VBA code but never tested against a real TMP file
@@ -258,12 +267,12 @@ Key findings from reverse-engineering `hardware.xlsm` `hlavni()`:
 | Behaviour              | How VBA does it                                                                                                                               | How backend does it                                                                                             |
 | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | CSV import             | Merge A–E into A, then TextToColumns with `;` → net effect: columns stay split                                                                | Direct semicolon split                                                                                          |
-| Parametry matching     | Iterate parametry, if `scanB`/`scanC` matches barcode prefix, get `type` + `copies` + `lastCycleNum`                                          | Same: build `Map<type, {copies, cycleFilter}>` for all matching types                                           |
-| Cycle filter           | `Right(barcode, 1)` vs `lastCycleNum` ("0" last, "1" first, "" always)                                                                        | `cycleFilterFromLastCycleNum()`                                                                                 |
+| Parametry matching     | Iterate parametry, if `scanB`/`scanC` matches barcode prefix, get `type` + `copies` + `lastCycleNum`                                          | Resolve scan prefix from workplace mapping, then match `scanC` only → build `Map<type, {copies, cycleFilter}>`  |
+| Cycle filter           | `Right(barcode, 1)` vs `lastCycleNum` ("0" last, "1" first, "" always)                                                                        | Real `cycleIndex`/`totalCycles` from API → `cycleFilterFromLastCycleNum()`                                      |
 | Template choice        | `aktualniCMDinter` for `*_hw_kr`, `aktualniCMD` for everything else (in `hlavni()`, not `tisk()`)                                             | `resolveConfig()` selects same templates                                                                        |
 | Door number filter     | **None** — `tisk()` prints ALL matching CSV rows regardless of door                                                                           | Door filtering removed                                                                                          |
 | Secondary "OUTSIDE EU" | If `countryAddress` has 2-letter non-EU code + space at position 3, VBA copies A1:A86 (full + OUTSIDE EU block); otherwise A1:A47 (full only) | `needsOutsideEuLabel()` checks country code; `generateEzpl()` concatenates `generateOutsideEuBlock()` when true |
-| Printer output         | `ActiveWorkbook.SaveAs xlTextPrinter` → `posliTisk()`                                                                                         | Raw EZPL bytes → TCP socket to Godex                                                                            |
+| Printer output         | `ActiveWorkbook.SaveAs xlTextPrinter` → `posliTisk()`                                                                                         | Raw EZPL bytes → UNC `copy /b` (primary), TCP raw socket (fallback), or default printer                         |
 | Duplicate guard        | Check `Databaze` sheet; if already printed (`Hledej()` match) → skip                                                                          | `label_print_log` DB table                                                                                      |
 
 ---
@@ -295,12 +304,15 @@ LABEL_PRINT_TRIGGER=STARTED
 # UNC path to the Štítky folder (CSV source files)
 LABEL_CSV_BASE_PATH=\\TOCZ-FS2\510-TOCZ\300 Departments\999 Common\01-FFS-Test\Štítky
 
-# Printer connection — RAW TCP (IP and port of the Godex EZ2250i)
-LABEL_PRINTER_HOST=
-LABEL_PRINTER_PORT=9100
+# (Obsolete — EZPL is generated directly, no .prn template files needed)
+# LABEL_TEMPLATES_PATH=
 
 # Printer connection — UNC method (identical to Excel: copy /b file.prn \\share)
 LABEL_PRINTER_UNC_PATH=\\tocz2420311\GodezEZ2250i
+
+# Printer connection — RAW TCP fallback (only used if UNC path is empty)
+LABEL_PRINTER_HOST=
+LABEL_PRINTER_PORT=9100
 
 # Optional override of copy count for ALL label types
 # LABEL_PRINTER_COPIES=1
@@ -309,7 +321,7 @@ LABEL_PRINTER_UNC_PATH=\\tocz2420311\GodezEZ2250i
 LABEL_TMP_FILES_PATH=\\TOCZ-FS2\510-TOCZ\300 Departments\300 Technical Services\Dokumentace B\NACTENO
 LABEL_COUNTRY_CODES_PATH=            # defaults to config/country-codes.json next to the .exe
 LABEL_QR_IMAGES_PATH=                # folder with Indy_SL.png, Guardy_SL.png, etc. (empty = dry-run)
-LABEL_QR_PRINTER=                    # IP address (raw TCP port 9100), Windows printer name, or empty = default printer
+LABEL_QR_PRINTER=                    # IP address (raw TCP 9100), Windows printer name, or empty = default printer via Start-Process
 ```
 
 ---
@@ -339,4 +351,4 @@ LABEL_QR_PRINTER=                    # IP address (raw TCP port 9100), Windows p
 - `LABEL_PRINTER_COPIES` (if set) overrides copy counts for **every** label
   type — it's meant for testing only, not production use.
 - VBA `posliTisk()` fails when called headless via COM (no Excel UI). The
-  backend's direct TCP approach does not have this limitation.
+  backend's UNC `copy /b` approach does not have this limitation.
