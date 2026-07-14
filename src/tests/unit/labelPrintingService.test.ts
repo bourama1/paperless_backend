@@ -5,9 +5,31 @@ const sampleCountryCodes = JSON.stringify({
     "czech republic": "CZ",
 });
 
+// Mirrors the real config/label-type-config.json shape, with entries for the
+// two label types used in sampleCsvContent below: "section" (door-leaf/wing
+// group) and "motor" (hardware/motor group) — so tests exercise the real
+// workplace → scan-prefix → parametry matching path instead of an empty config.
 const sampleParametryConfig = JSON.stringify([
-    { scanB: "", scanC: "PO-001", type: "section", printPrimary: "Ano", printSecondary: "Ne", copies: 4, printMethod: "", lastCycleNum: "" },
-    { scanB: "", scanC: "PO-001", type: "motor", printPrimary: "Ano", printSecondary: "Ne", copies: 1, printMethod: "", lastCycleNum: "1" },
+    {
+        scanB: "KM-SVK ",
+        scanC: 'K"žSVK ',
+        type: "section",
+        printPrimary: "Ano",
+        printSecondary: "Ne",
+        copies: 4,
+        printMethod: "V sérii",
+        lastCycleNum: "",
+    },
+    {
+        scanB: "KM-SVM ",
+        scanC: 'K"žSV" ',
+        type: "motor",
+        printPrimary: "Ano",
+        printSecondary: "Ne",
+        copies: 1,
+        printMethod: "V sérii",
+        lastCycleNum: "1",
+    },
 ]);
 
 jest.mock("fs", () => {
@@ -97,7 +119,6 @@ describe("Label Printing Service", () => {
 
         (fs.readFileSync as jest.Mock).mockImplementation((path: string) => {
             if (path.includes("country-codes.json")) return sampleCountryCodes;
-            if (path.includes("label-type-config.json")) return sampleParametryConfig;
             return sampleCsvContent;
         });
         (fs.existsSync as jest.Mock).mockReturnValue(true);
@@ -186,9 +207,7 @@ describe("Label Printing Service", () => {
         it("should skip if TMP file is not found", async () => {
             (fs.existsSync as jest.Mock).mockReturnValue(false);
 
-            const labelRows = [
-                { tmpFile: "TMP123.TXT" } as any,
-            ];
+            const labelRows = [{ tmpFile: "TMP123.TXT" } as any];
 
             await handleQrSticker(mockOrderUpdate, labelRows);
         });

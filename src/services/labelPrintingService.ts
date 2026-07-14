@@ -4,7 +4,10 @@
  * Replicates the hardware.xlsm VBA macro logic.
  *
  * Flow:
- *  1. Triggered by /order-update (STARTED or FINISHED, Hardware workplace only)
+ *  1. Triggered by /order-update (STARTED or FINISHED). The workplace is
+ *     mapped to a scan-prefix group (door-leaf/wing, hardware/motor, or
+ *     rail/track) via WORKPLACE_TO_SCAN_PREFIX below; unrecognized
+ *     workplaces are skipped and logged.
  *  2. Reads the semicolon-delimited CSV from the network share:
  *       \\TOCZ-FS2\510-TOCZ\300 Departments\999 Common\01-FFS-Test\Stítky\{salesOrder} {position}.csv
  *  3. For each label row generates EZPL directly (no .prn template files needed)
@@ -31,10 +34,90 @@ import { OrderUpdate } from "./workstationService";
 
 // EU countries that use the 47-line simplified label (from parametry AM:AN)
 const EU_COUNTRIES = new Set([
-    "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR",
-    "DE", "GR", "HU", "IE", "IT", "LV", "LT", "LU", "MT", "NL",
-    "PL", "PT", "RO", "SK", "SI", "ES", "SE",
+    "AT",
+    "BE",
+    "BG",
+    "HR",
+    "CY",
+    "CZ",
+    "DK",
+    "EE",
+    "FI",
+    "FR",
+    "DE",
+    "GR",
+    "HU",
+    "IE",
+    "IT",
+    "LV",
+    "LT",
+    "LU",
+    "MT",
+    "NL",
+    "PL",
+    "PT",
+    "RO",
+    "SK",
+    "SI",
+    "ES",
+    "SE",
 ]);
+
+// ─── workplace → scan-prefix mapping ───────────────────────────────────────────
+//
+// The VBA macro's typKodu came from a physical barcode scan (first 7 chars),
+// which really identifies which of 3 packages is being labeled: door-leaf/wing
+// (K"žSVK ), hardware/motor (K"žSV" ), or rail/track (K"žSVV ). The automated
+// /order-update API has no barcode — instead, order.workplace identifies which
+// production station just finished, so we map workplace names to the same 3
+// groups here.
+//
+// Mapping derived from the parametry sheet's own translation table
+// (columns U/W/X), cross-checked against live production logs:
+//   - "Hardware", "Předmontáž optolišty"                       → hardware/motor
+//   - "Předpříprava hřídele" (seen in logs as "PredHridel"),
+//     "Mandoor", "2KV", "Balírna (křídlo)", "Křídlo"            → door-leaf/wing
+//   - "Vedení", "Vedení INDY", "Vedení GUARDY"                 → rail/track
+// "Falešný překlad" ("fake/dummy translation") is a spreadsheet test entry,
+// not a real workplace, and is intentionally excluded.
+//
+// CAUTION: only "Hardware" and "PredHridel" have been confirmed against real
+// production payloads so far. The rest are best-effort transliterations of
+// the Czech station names in the spreadsheet. Any workplace that doesn't
+// normalize to a known key is logged loudly (not silently skipped) so the
+// mapping can be corrected once more real workplace names are seen.
+const SCAN_PREFIX = {
+    KRIDLO: 'K"žSVK ', // door-leaf / wing
+    HARDWARE: 'K"žSV" ', // hardware / motor
+    VEDENI: 'K"žSVV ', // rail / track
+} as const;
+
+function normalizeWorkplace(name: string): string {
+    return name
+        .normalize("NFD")
+        .replace(/[\u0300-\u036f]/g, "") // strip diacritics
+        .replace(/[^a-zA-Z0-9]/g, "") // strip spaces/punctuation
+        .toLowerCase();
+}
+
+const WORKPLACE_TO_SCAN_PREFIX: Record<string, string> = {
+    hardware: SCAN_PREFIX.HARDWARE,
+    predmontazoptolisty: SCAN_PREFIX.HARDWARE,
+
+    predpripravahridele: SCAN_PREFIX.KRIDLO, // "PredHridel" in production logs
+    mandoor: SCAN_PREFIX.KRIDLO,
+    "2kv": SCAN_PREFIX.KRIDLO,
+    balirnakridlo: SCAN_PREFIX.KRIDLO,
+    kridlo: SCAN_PREFIX.KRIDLO,
+
+    vedeni: SCAN_PREFIX.VEDENI,
+    vedeniindy: SCAN_PREFIX.VEDENI,
+    vedeniguardy: SCAN_PREFIX.VEDENI,
+};
+
+function resolveScanPrefix(workplace: string): string | undefined {
+    return WORKPLACE_TO_SCAN_PREFIX[normalizeWorkplace(workplace)];
+}
 
 // ─── env ─────────────────────────────────────────────────────────────────────
 
@@ -50,15 +133,12 @@ const CSV_BASE_PATH =
     process.env.LABEL_CSV_BASE_PATH || "\\\\TOCZ-FS2\\510-TOCZ\\300 Departments\\999 Common\\01-FFS-Test\\Štítky";
 
 // When packaged as a standalone .exe (pkg), __dirname = exe directory, not dist/
-const cfgDir = (process as any).pkg
-    ? path.join(path.dirname(process.execPath), "config")
-    : path.join(__dirname, "../../config");
+const cfgDir =
+    (process as any).pkg ? path.join(path.dirname(process.execPath), "config") : path.join(__dirname, "../../config");
 
-const COUNTRY_CODES_PATH =
-    process.env.LABEL_COUNTRY_CODES_PATH || path.join(cfgDir, "country-codes.json");
+const COUNTRY_CODES_PATH = process.env.LABEL_COUNTRY_CODES_PATH || path.join(cfgDir, "country-codes.json");
 
-const LABEL_TYPE_CONFIG_PATH =
-    process.env.LABEL_TYPE_CONFIG_PATH || path.join(cfgDir, "label-type-config.json");
+const LABEL_TYPE_CONFIG_PATH = process.env.LABEL_TYPE_CONFIG_PATH || path.join(cfgDir, "label-type-config.json");
 
 // Loaded once at startup, reloaded automatically if the file changes
 let countryCodeMap: Record<string, string> = {};
@@ -427,13 +507,11 @@ function generateSimpleBlock(label: LabelRow): string {
     const cc = countryCode(label.deliveryCountry);
 
     let cName1 = label.customerName;
-    let cName2 = "";
     if (label.customerName.includes("/")) {
         const idx = label.customerName.indexOf("/");
         cName1 = label.customerName.slice(0, idx + 1);
-        cName2 = label.customerName.slice(idx + 1);
     } else {
-        [cName1, cName2] = splitLine(label.customerName, 10);
+        cName1 = splitLine(label.customerName, 10)[0];
     }
 
     const orderNum = label.orderNumber.replace(/^Z/, "");
@@ -563,12 +641,8 @@ function needsOutsideEuLabel(label: LabelRow): boolean {
  * This function returns the concatenation of both when applicable.
  */
 export function generateEzpl(label: LabelRow, template: string): Buffer {
-    const block = template === "aktualniCMDinter"
-        ? generateSimpleBlock(label)
-        : generatePrimaryBlock(label);
-    const extra = (template === "aktualniCMD" && needsOutsideEuLabel(label))
-        ? "\n" + generateOutsideEuBlock(label)
-        : "";
+    const block = template === "aktualniCMDinter" ? generateSimpleBlock(label) : generatePrimaryBlock(label);
+    const extra = template === "aktualniCMD" && needsOutsideEuLabel(label) ? "\n" + generateOutsideEuBlock(label) : "";
     return Buffer.from(block + extra + "\n", "latin1");
 }
 
@@ -762,8 +836,13 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         console.log(`[LABELS] action=${update.action} – not trigger (${LABEL_PRINT_TRIGGER}), skip`);
         return;
     }
-    if (update.order.workplace !== "Hardware") {
-        console.log(`[LABELS] workplace=${update.order.workplace} – not Hardware, skip`);
+    const prefix = resolveScanPrefix(update.order.workplace);
+    if (!prefix) {
+        console.log(
+            `[LABELS] workplace="${update.order.workplace}" not recognized ` +
+                `(normalized: "${normalizeWorkplace(update.order.workplace)}") – skip. ` +
+                `If this IS a label-relevant workplace, add it to WORKPLACE_TO_SCAN_PREFIX.`,
+        );
         return;
     }
 
@@ -785,14 +864,12 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         return;
     }
 
-    // Barcode prefix matching — mirrors VBA scan of parametry sheet.
+    // Parametry matching — mirrors VBA scan of parametry sheet, but keyed off
+    // the workplace-derived prefix instead of a physically-scanned barcode.
     // Find ALL matching parametry entries (not just the last one).
-    // The VBA iterates parametry rows and for each match iterates CSV rows
-    // looking for a type match. Types not found in parametry are skipped.
-    const prefix = order.productOrder.slice(0, 7);
     const matchingTypes = new Map<string, { copies: number; cycleFilter: CycleFilter }>();
     for (const entry of parametryConfig) {
-        if (entry.scanC === prefix || entry.scanB === prefix) {
+        if (entry.scanC === prefix) {
             matchingTypes.set(entry.type, {
                 copies: entry.copies,
                 cycleFilter: cycleFilterFromLastCycleNum(entry.lastCycleNum),
@@ -801,11 +878,13 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     }
 
     if (matchingTypes.size === 0) {
-        console.log(`[LABELS] Barcode "${order.productOrder}" — no parametry match, nothing to print`);
+        console.log(
+            `[LABELS] workplace="${order.workplace}" (prefix "${prefix}") — no parametry match, nothing to print`,
+        );
         return;
     }
 
-    console.log(`[LABELS] Barcode "${order.productOrder}" → ${matchingTypes.size} matching types in parametry`);
+    console.log(`[LABELS] workplace="${order.workplace}" → ${matchingTypes.size} matching types in parametry`);
 
     // Keep only CSV rows whose type exists in the parametry match set.
     labelRows = labelRows.filter((row) => matchingTypes.has(row.labelType));
@@ -814,16 +893,17 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         return;
     }
 
-    const { cycleIndex } = update;
-    const lastDigit = order.productOrder.slice(-1);
-    console.log(`[LABELS] Barcode ends in "${lastDigit}" (cycle=${cycleIndex})`);
+    const { cycleIndex, totalCycles } = update;
+    const isFirstCycle = cycleIndex === 1;
+    const isLastCycle = cycleIndex === totalCycles;
+    console.log(`[LABELS] cycle ${cycleIndex}/${totalCycles} (first=${isFirstCycle}, last=${isLastCycle})`);
 
     // Build a set of all known parametry types for CSV row filtering
     const allParametryTypes = new Set(parametryConfig.map((e: any) => e.type));
     const cycleRows = labelRows.filter((r) => allParametryTypes.has(r.labelType));
 
     console.log(
-        `[LABELS] ${cycleRows.length} rows for cycle ${cycleIndex} (barcode ends in ${lastDigit}, ${labelRows.length} matching in CSV)`,
+        `[LABELS] ${cycleRows.length} rows for cycle ${cycleIndex}/${totalCycles} (${labelRows.length} matching in CSV)`,
     );
 
     let printed = 0;
@@ -831,14 +911,15 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 
     // VBA iterates parametry entries FIRST, then CSV rows — maintain parametry order
     for (const entry of parametryConfig) {
-        // Only process entries matching the barcode prefix (each entry checked independently)
-        if (!(entry.scanC === prefix || entry.scanB === prefix)) continue;
+        // Only process entries matching the workplace-derived prefix (each entry checked independently)
+        if (entry.scanC !== prefix) continue;
 
         const cf = cycleFilterFromLastCycleNum(entry.lastCycleNum);
 
-        // Cycle filter — mirrors VBA: skip types that don't match the barcode's last digit
-        if (cf === "first" && lastDigit !== "1") continue;
-        if (cf === "last" && lastDigit !== "0") continue;
+        // Cycle filter — mirrors VBA, driven by the real cycleIndex/totalCycles
+        // fields instead of a barcode's last digit.
+        if (cf === "first" && !isFirstCycle) continue;
+        if (cf === "last" && !isLastCycle) continue;
 
         for (const row of cycleRows) {
             if (row.labelType !== entry.type) continue;
@@ -1037,8 +1118,13 @@ async function printQrPng(pngPath: string, copies: number): Promise<void> {
                 const socket = new net.Socket();
                 socket.connect(9100, QR_PRINTER, () => {
                     socket.write(pngBuf, (err) => {
-                        if (err) { socket.destroy(); reject(err); }
-                        else { socket.end(); resolve(); }
+                        if (err) {
+                            socket.destroy();
+                            reject(err);
+                        } else {
+                            socket.end();
+                            resolve();
+                        }
                     });
                 });
                 socket.on("error", reject);
