@@ -75,7 +75,7 @@ const EU_COUNTRIES = new Set([
 // Mapping derived from the parametry sheet's own translation table
 // (columns U/W/X), cross-checked against live production logs:
 //   - "Hardware", "Předmontáž optolišty"                       → hardware/motor
-//   - "Předpříprava hřídele", "PredHridel" (seen in production logs),
+//   - "Předpříprava hřídele" (seen in logs as "PredHridel"),
 //     "Mandoor", "2KV", "Balírna (křídlo)", "Křídlo"            → door-leaf/wing
 //   - "Vedení", "Vedení INDY", "Vedení GUARDY"                 → rail/track
 // "Falešný překlad" ("fake/dummy translation") is a spreadsheet test entry,
@@ -104,8 +104,7 @@ const WORKPLACE_TO_SCAN_PREFIX: Record<string, string> = {
     hardware: SCAN_PREFIX.HARDWARE,
     predmontazoptolisty: SCAN_PREFIX.HARDWARE,
 
-    predpripravahridele: SCAN_PREFIX.KRIDLO, // full diacritic-normalized form
-    predhridel: SCAN_PREFIX.KRIDLO, // "PredHridel" as seen in production logs
+    predpripravahridele: SCAN_PREFIX.KRIDLO, // "PredHridel" in production logs
     mandoor: SCAN_PREFIX.KRIDLO,
     "2kv": SCAN_PREFIX.KRIDLO,
     balirnakridlo: SCAN_PREFIX.KRIDLO,
@@ -350,10 +349,6 @@ export function resolveConfig(labelType: string): LabelTypeConfig {
  * Builds the CSV path exactly as the VBA macro did:
  *   pozice = last 3 chars of barcode → first 2 + "0"
  *   file   = prodejniObjednavka & " " & pozice & ".csv"
- *
- * The `position` argument must be the barcode-derived 2-digit position
- * WITHOUT the cycle digit (e.g. parse "01" from barcode suffix "010", pass "1").
- * The API's position value is converted before calling this function.
  *
  * From the order payload:
  *   salesOrder "602969", position "30"  →  "602969 300.csv"
@@ -854,18 +849,11 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     await ensurePrintLogTable();
 
     const { order } = update;
-
-    // API sends position as the numeric value of the barcode's 3-char suffix
-    // (e.g. barcode "…010" → suffix "010" → numeric 10 → API sends "10").
-    // The CSV filename uses the 2-digit position code (first 2 chars of suffix)
-    // + "0", so we strip the cycle digit by dividing by 10.
-    const csvPosition = String(Math.floor(parseInt(order.position, 10) / 10));
-
     console.log(`[LABELS] Order ${order.productOrder} (${order.salesOrder}/${order.position})`);
 
     let labelRows: LabelRow[];
     try {
-        labelRows = readCsvFile(order.salesOrder, csvPosition);
+        labelRows = readCsvFile(order.salesOrder, order.position);
     } catch (err: any) {
         console.error(`[LABELS] ${err.message}`);
         return;
