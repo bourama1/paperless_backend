@@ -2,6 +2,17 @@
     "version": "2.0.0",
     "tasks": [
         {
+            "label": "Run backend (dev mode)",
+            "type": "shell",
+            "command": "npm run dev",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "isBackground": true,
+            "problemMatcher": [],
+            "detail": "Run with ts-node + nodemon (auto-restart on changes) on Port 5300"
+        },
+        {
             "label": "Test all barcodes",
             "type": "shell",
             "command": "scripts\\run-test.bat -KeepFiles",
