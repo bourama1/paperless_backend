@@ -142,6 +142,11 @@ const DOCUMENT_TYPES = {
 async function printDocumentsForOrder(order: OrderUpdate["order"]) {
     console.log(`Order ${order._id} (${order.productOrder}) at ${order.workplace}. Fetching documents...`);
 
+    if (!order.projectNumber || !order.position) {
+        console.log(`[DOCS] projectNumber or position empty — skipping document fetch for order ${order.productOrder}`);
+        return;
+    }
+
     try {
         const docsToPrint: string[] = [];
 
