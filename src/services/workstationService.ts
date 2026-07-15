@@ -145,21 +145,14 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
     try {
         const docsToPrint: string[] = [];
 
-        const pbomHardwareDocs = await fetchDocumentsByType(order, DOCUMENT_TYPES.PBOM_HARDWARE);
-        docsToPrint.push(...pbomHardwareDocs);
-        console.log(`Found ${pbomHardwareDocs.length} PBOM Hardware documents`);
+        const typesCsv = process.env.DOCUMENTS_TYPES || "14,4,5,21";
+        const typeIds = typesCsv.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
 
-        const declConformity = await fetchDocumentsByType(order, DOCUMENT_TYPES.DECLARATION_CONFORMITY);
-        docsToPrint.push(...declConformity);
-        console.log(`Found ${declConformity.length} Declarations of Conformity`);
-
-        const declPerformance = await fetchDocumentsByType(order, DOCUMENT_TYPES.DECLARATION_PERFORMANCE);
-        docsToPrint.push(...declPerformance);
-        console.log(`Found ${declPerformance.length} Declarations of Performance`);
-
-        const confirmations = await fetchDocumentsByType(order, DOCUMENT_TYPES.CONFIRMATION);
-        docsToPrint.push(...confirmations);
-        console.log(`Found ${confirmations.length} Confirmation documents`);
+        for (const typeId of typeIds) {
+            const docs = await fetchDocumentsByType(order, typeId);
+            docsToPrint.push(...docs);
+            console.log(`Found ${docs.length} documents of type ${typeId}`);
+        }
 
         await triggerPrinting(docsToPrint, order);
     } catch (error) {
