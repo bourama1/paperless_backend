@@ -8,7 +8,7 @@ const WORKSTATIONS_API_URL =
     "http://10.110.60.21:40000/api/p2l/services/workstations_process";
 
 export const DOC_MANAGER_URL =
-    process.env.DOC_MANAGER_URL || "http://10.110.60.21:40000";
+    process.env.DOC_MANAGER_URL || "http://tocz-app4:5200";
 
 export interface WorkstationProcess {
     workstation: string;

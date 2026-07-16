@@ -65,8 +65,7 @@ app.use((req, res, next) => {
 app.use(morgan("dev"));
 
 // Static files for PDFs
-const STORAGE_PATH =
-    process.env.STORAGE_PATH || path.join(process.cwd(), "storage");
+const STORAGE_PATH = process.env.STORAGE_PATH || "./storage";
 if (!fs.existsSync(STORAGE_PATH)) {
     fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
