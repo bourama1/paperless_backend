@@ -53,7 +53,9 @@ app.use((req, res, next) => {
         if (bodyStr.length > 2000) bodyStr = bodyStr.substring(0, 2000) + "...";
         console.log(`[API] ${req.method} ${req.url} ${bodyStr}`);
     } else if (Object.keys(req.query).length > 0) {
-        console.log(`[API] ${req.method} ${req.url} query=${JSON.stringify(req.query)}`);
+        console.log(
+            `[API] ${req.method} ${req.url} query=${JSON.stringify(req.query)}`,
+        );
     } else {
         console.log(`[API] ${req.method} ${req.url}`);
     }
@@ -63,7 +65,8 @@ app.use((req, res, next) => {
 app.use(morgan("dev"));
 
 // Static files for PDFs
-const STORAGE_PATH = process.env.STORAGE_PATH || path.join(process.cwd(), "storage");
+const STORAGE_PATH =
+    process.env.STORAGE_PATH || path.join(process.cwd(), "storage");
 if (!fs.existsSync(STORAGE_PATH)) {
     fs.mkdirSync(STORAGE_PATH, { recursive: true });
 }
@@ -97,10 +100,26 @@ if (process.env.NODE_ENV !== "test") {
 
         // Start polling workstations
         const { pollWorkstations } = require("./services/workstationService");
-        const POLL_INTERVAL = parseInt(process.env.WORKSTATIONS_POLL_INTERVAL || "15000", 10);
+        const POLL_INTERVAL = parseInt(
+            process.env.WORKSTATIONS_POLL_INTERVAL || "15000",
+            10,
+        );
         pollWorkstations();
         setInterval(pollWorkstations, POLL_INTERVAL);
-        console.log(`Workstation polling started (interval: ${POLL_INTERVAL}ms)`);
+        console.log(
+            `Workstation polling started (interval: ${POLL_INTERVAL}ms)`,
+        );
+
+        // Start retention archival sweep (finished orders -> PDF/A -> network share)
+        const {
+            runArchivalSweep,
+            ARCHIVE_POLL_INTERVAL_MS,
+        } = require("./services/archivalService");
+        runArchivalSweep();
+        setInterval(runArchivalSweep, ARCHIVE_POLL_INTERVAL_MS);
+        console.log(
+            `Retention archival sweep started (interval: ${ARCHIVE_POLL_INTERVAL_MS}ms)`,
+        );
     });
 }
 

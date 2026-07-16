@@ -1,6 +1,11 @@
 import { Request, Response } from "express";
 import { getDb } from "../config/database";
-import { handleOrderUpdate, OrderUpdate, importDocument, searchPbom } from "../services/workstationService";
+import {
+    handleOrderUpdate,
+    OrderUpdate,
+    importDocument,
+    searchPbom,
+} from "../services/workstationService";
 import path from "path";
 import fs from "fs";
 import axios from "axios";
@@ -23,7 +28,9 @@ function parseDocmgrRef(ref: string) {
     };
 }
 
-async function resolveDocumentStream(documentId: number): Promise<{ stream: Readable; filename: string } | null> {
+async function resolveDocumentStream(
+    documentId: number,
+): Promise<{ stream: Readable; filename: string } | null> {
     const db = await getDb();
     const doc = await db("documents").where({ id: documentId }).first();
     if (!doc) return null;
@@ -74,7 +81,9 @@ export const getWorkstations = async (req: Request, res: Response) => {
 
         const result = workstations.map((ws: any) => ({
             ...ws,
-            current_order_data: ws.current_order_data ? JSON.parse(ws.current_order_data) : null,
+            current_order_data: ws.current_order_data
+                ? JSON.parse(ws.current_order_data)
+                : null,
         }));
 
         res.json(result);
@@ -88,11 +97,15 @@ export const receiveOrderUpdate = async (req: Request, res: Response) => {
     const update = req.body as OrderUpdate;
 
     if (!update || !update.order || !update.action) {
-        return res.status(400).json({ error: "Invalid payload: order and action are required" });
+        return res
+            .status(400)
+            .json({ error: "Invalid payload: order and action are required" });
     }
 
     if (!["STARTED", "FINISHED"].includes(update.action)) {
-        return res.status(400).json({ error: "Invalid action. Must be STARTED or FINISHED" });
+        return res
+            .status(400)
+            .json({ error: "Invalid action. Must be STARTED or FINISHED" });
     }
 
     try {
@@ -105,10 +118,19 @@ export const receiveOrderUpdate = async (req: Request, res: Response) => {
 };
 
 export const importPbom = async (req: Request, res: Response) => {
-    const { projectNumber, position, customer, productOrder, productDesc, documentType } = req.body;
+    const {
+        projectNumber,
+        position,
+        customer,
+        productOrder,
+        productDesc,
+        documentType,
+    } = req.body;
 
     if (!projectNumber || !position || !customer) {
-        return res.status(400).json({ error: "projectNumber, position, and customer are required" });
+        return res.status(400).json({
+            error: "projectNumber, position, and customer are required",
+        });
     }
 
     try {
@@ -123,7 +145,10 @@ export const importPbom = async (req: Request, res: Response) => {
         res.json(doc);
     } catch (error: any) {
         console.error("Error importing PBOM:", error);
-        const message = error?.response?.data?.error || error.message || "Internal server error";
+        const message =
+            error?.response?.data?.error ||
+            error.message ||
+            "Internal server error";
         res.status(500).json({ error: message });
     }
 };
@@ -132,7 +157,9 @@ export const searchPbomHandler = async (req: Request, res: Response) => {
     const { order_code } = req.query;
 
     if (!order_code) {
-        return res.status(400).json({ error: "order_code query parameter is required" });
+        return res
+            .status(400)
+            .json({ error: "order_code query parameter is required" });
     }
 
     try {
@@ -163,7 +190,9 @@ export const getWorkstationLog = async (req: Request, res: Response) => {
 
         const result = logs.map((log: any) => ({
             ...log,
-            order_snapshot: log.order_snapshot ? JSON.parse(log.order_snapshot) : null,
+            order_snapshot: log.order_snapshot
+                ? JSON.parse(log.order_snapshot)
+                : null,
         }));
 
         res.json(result);
@@ -183,7 +212,10 @@ export const renderDocument = async (req: Request, res: Response) => {
         }
 
         res.setHeader("Content-Type", "application/pdf");
-        res.setHeader("Content-Disposition", `inline; filename="${result.filename}"`);
+        res.setHeader(
+            "Content-Disposition",
+            `inline; filename="${result.filename}"`,
+        );
         result.stream.pipe(res);
     } catch (error) {
         console.error("Error rendering document:", error);
@@ -208,7 +240,9 @@ async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
     const revMatch = base.match(/^(.*)_Rev(\d+)$/i);
     const sourceRev = revMatch ? parseInt(revMatch[2]!, 10) : 0;
     const revNumber = Math.max(editRev, sourceRev + 1);
-    const newFilename = revMatch ? `${revMatch[1]}_Rev${revNumber}${ext}` : `${base}_Rev${revNumber}${ext}`;
+    const newFilename = revMatch
+        ? `${revMatch[1]}_Rev${revNumber}${ext}`
+        : `${base}_Rev${revNumber}${ext}`;
 
     if (!fs.existsSync(STORAGE_PATH)) {
         fs.mkdirSync(STORAGE_PATH, { recursive: true });
@@ -225,9 +259,13 @@ async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
                 fs.mkdirSync(networkDir, { recursive: true });
             }
             fs.copyFileSync(filePath, networkPath);
-            console.log(`[save-edited-pdf] Copied to network share: ${networkPath}`);
+            console.log(
+                `[save-edited-pdf] Copied to network share: ${networkPath}`,
+            );
         } catch (err: any) {
-            console.error(`[save-edited-pdf] Failed to copy to network share: ${err.message}`);
+            console.error(
+                `[save-edited-pdf] Failed to copy to network share: ${err.message}`,
+            );
         }
     }
 
@@ -236,7 +274,9 @@ async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
         filename: newFilename,
         version: revNumber,
     });
-    console.log(`[save-edited-pdf] Created revision ${revNumber} for document ${documentId}`);
+    console.log(
+        `[save-edited-pdf] Created revision ${revNumber} for document ${documentId}`,
+    );
 
     return { filename: newFilename, revision: revNumber };
 }
@@ -244,16 +284,22 @@ async function saveEditedPdf(documentId: number, pdfBuffer: Buffer) {
 export const saveEdited = async (req: Request, res: Response) => {
     const { documentId, pdfBase64, filename: _filename } = req.body;
     if (!documentId || !pdfBase64) {
-        return res.status(400).json({ error: "documentId and pdfBase64 are required" });
+        return res
+            .status(400)
+            .json({ error: "documentId and pdfBase64 are required" });
     }
 
     try {
         const pdfBuffer = Buffer.from(pdfBase64, "base64");
-        console.log(`[save-edited] Receiving PDF for document ${documentId} (${pdfBuffer.length} bytes)`);
+        console.log(
+            `[save-edited] Receiving PDF for document ${documentId} (${pdfBuffer.length} bytes)`,
+        );
         const result = await saveEditedPdf(Number(documentId), pdfBuffer);
         res.json({ status: "ok", ...result });
     } catch (error: any) {
         console.error("Error saving edited document:", error);
-        res.status(500).json({ error: error.message || "Internal server error" });
+        res.status(500).json({
+            error: error.message || "Internal server error",
+        });
     }
 };

@@ -92,7 +92,9 @@ describe("Workstation Service", () => {
         });
 
         it("should emit workstations-updated event via socket.io", async () => {
-            const axiosResponse = { data: [{ workstation: "WS1", order: null }] };
+            const axiosResponse = {
+                data: [{ workstation: "WS1", order: null }],
+            };
             (axios.get as jest.Mock).mockResolvedValue(axiosResponse);
 
             const db = Object.assign(jest.fn(), {
@@ -107,7 +109,10 @@ describe("Workstation Service", () => {
             await pollWorkstations();
 
             const { io } = require("../../index");
-            expect(io.emit).toHaveBeenCalledWith("workstations-updated", axiosResponse.data);
+            expect(io.emit).toHaveBeenCalledWith(
+                "workstations-updated",
+                axiosResponse.data,
+            );
         });
     });
 
@@ -154,14 +159,28 @@ describe("Workstation Service", () => {
         });
 
         it("should clear workstation on FINISHED action", async () => {
-            const finishedUpdate = { ...mockUpdate, action: "FINISHED" as const };
+            const finishedUpdate = {
+                ...mockUpdate,
+                action: "FINISHED" as const,
+            };
             const db = jest.fn();
             db.mockImplementation((table: string) => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
                 if (table === "workstations") {
-                    return { where: () => ({ update: () => thenable(undefined) }) };
+                    return {
+                        where: () => ({ update: () => thenable(undefined) }),
+                    };
+                }
+                if (table === "order_archive_log") {
+                    return {
+                        insert: () => ({
+                            onConflict: () => ({
+                                ignore: () => thenable(undefined),
+                            }),
+                        }),
+                    };
                 }
                 return {};
             });
@@ -173,21 +192,74 @@ describe("Workstation Service", () => {
             expect(handleLabelPrinting).toHaveBeenCalledWith(finishedUpdate);
         });
 
+        it("should queue the order for retention archival on FINISHED", async () => {
+            const finishedUpdate = {
+                ...mockUpdate,
+                action: "FINISHED" as const,
+            };
+            const db = jest.fn();
+            const archiveInsert = jest.fn(() => ({
+                onConflict: () => ({ ignore: () => thenable(undefined) }),
+            }));
+            db.mockImplementation((table: string) => {
+                if (table === "workstation_log") {
+                    return { insert: () => thenable(undefined) };
+                }
+                if (table === "workstations") {
+                    return {
+                        where: () => ({ update: () => thenable(undefined) }),
+                    };
+                }
+                if (table === "order_archive_log") {
+                    return { insert: archiveInsert };
+                }
+                return {};
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await handleOrderUpdate(finishedUpdate);
+
+            expect(db).toHaveBeenCalledWith("order_archive_log");
+            expect(archiveInsert).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    order_id: mockOrder._id,
+                    project_number: mockOrder.projectNumber,
+                    position: mockOrder.position,
+                }),
+            );
+        });
+
         it("should propagate errors", async () => {
             (getDb as jest.Mock).mockRejectedValue(new Error("DB Error"));
 
-            await expect(handleOrderUpdate(mockUpdate)).rejects.toThrow("DB Error");
+            await expect(handleOrderUpdate(mockUpdate)).rejects.toThrow(
+                "DB Error",
+            );
         });
 
         it("should not fetch or print documents on FINISHED", async () => {
-            const finishedUpdate = { ...mockUpdate, action: "FINISHED" as const };
+            const finishedUpdate = {
+                ...mockUpdate,
+                action: "FINISHED" as const,
+            };
             const db = jest.fn();
             db.mockImplementation((table: string) => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
                 if (table === "workstations") {
-                    return { where: () => ({ update: () => thenable(undefined) }) };
+                    return {
+                        where: () => ({ update: () => thenable(undefined) }),
+                    };
+                }
+                if (table === "order_archive_log") {
+                    return {
+                        insert: () => ({
+                            onConflict: () => ({
+                                ignore: () => thenable(undefined),
+                            }),
+                        }),
+                    };
                 }
                 return {};
             });
@@ -221,10 +293,14 @@ describe("Workstation Service", () => {
             })
                 .mockReturnValueOnce({ insert: () => thenable(undefined) })
                 .mockReturnValueOnce({
-                    where: () => ({ first: () => thenable({ id: 1, name: "test.pdf" }) }),
+                    where: () => ({
+                        first: () => thenable({ id: 1, name: "test.pdf" }),
+                    }),
                 })
                 .mockReturnValueOnce({
-                    where: () => ({ orderBy: () => thenable([{ id: 1, version: 1 }]) }),
+                    where: () => ({
+                        orderBy: () => thenable([{ id: 1, version: 1 }]),
+                    }),
                 });
             (getDb as jest.Mock).mockResolvedValue(db);
 

@@ -10,7 +10,11 @@ import request from "supertest";
 import express from "express";
 import workstationRoutes from "../../routes/workstations";
 import { getDb } from "../../config/database";
-import { handleOrderUpdate, importDocument, searchPbom } from "../../services/workstationService";
+import {
+    handleOrderUpdate,
+    importDocument,
+    searchPbom,
+} from "../../services/workstationService";
 
 jest.mock("../../config/database");
 jest.mock("../../services/workstationService");
@@ -35,7 +39,12 @@ describe("Workstation API Integration", () => {
     describe("GET /workstations", () => {
         it("should return 200 and list of workstations", async () => {
             const mockWorkstations = [
-                { id: 1, name: "WS1", current_order_id: null, current_order_data: null },
+                {
+                    id: 1,
+                    name: "WS1",
+                    current_order_id: null,
+                    current_order_data: null,
+                },
             ];
             const db = jest.fn();
             db.mockReturnValue({ orderBy: () => thenable(mockWorkstations) });
@@ -114,7 +123,11 @@ describe("Workstation API Integration", () => {
 
             const response = await request(app)
                 .post("/workstations/import-pbom")
-                .send({ projectNumber: "PN-001", position: "01", customer: "Customer" });
+                .send({
+                    projectNumber: "PN-001",
+                    position: "01",
+                    customer: "Customer",
+                });
 
             expect(response.status).toBe(200);
             expect(response.body).toEqual(mockDoc);
@@ -134,7 +147,9 @@ describe("Workstation API Integration", () => {
 
     describe("GET /workstations/search-pbom", () => {
         it("should return 200 with search results", async () => {
-            const mockResults = [{ customer_code: 0, order_code: 12345, position_code: 1 }];
+            const mockResults = [
+                { customer_code: 0, order_code: 12345, position_code: 1 },
+            ];
             (searchPbom as jest.Mock).mockResolvedValue(mockResults);
 
             const response = await request(app)
@@ -146,7 +161,9 @@ describe("Workstation API Integration", () => {
         });
 
         it("should return 400 when order_code is missing", async () => {
-            const response = await request(app).get("/workstations/search-pbom");
+            const response = await request(app).get(
+                "/workstations/search-pbom",
+            );
 
             expect(response.status).toBe(400);
             expect(response.body).toEqual({
@@ -158,7 +175,13 @@ describe("Workstation API Integration", () => {
     describe("GET /workstations/log", () => {
         it("should return 200 with logs", async () => {
             const mockLogs = [
-                { id: 1, workstation_name: "WS1", order_id: "ord1", action: "STARTED", order_snapshot: null },
+                {
+                    id: 1,
+                    workstation_name: "WS1",
+                    order_id: "ord1",
+                    action: "STARTED",
+                    order_snapshot: null,
+                },
             ];
             const db = jest.fn();
             db.mockReturnValue({ orderBy: () => thenable(mockLogs) });

@@ -14,7 +14,8 @@ export async function insertGetId<T extends Record<string, any>>(
     const result = await targetDb(table).insert(data).returning(idColumn);
     const row = result[0];
     if (typeof row === "number") return row;
-    if (row && typeof row === "object" && idColumn in row) return Number(row[idColumn]);
+    if (row && typeof row === "object" && idColumn in row)
+        return Number(row[idColumn]);
     throw new Error(`insertGetId: could not determine ${String(idColumn)}`);
 }
 
@@ -52,7 +53,11 @@ const setupDatabase = async (targetDb: Knex) => {
     if (!(await targetDb.schema.hasTable("revisions"))) {
         await targetDb.schema.createTable("revisions", (table) => {
             table.increments("id").primary();
-            table.integer("document_id").notNullable().references("id").inTable("documents");
+            table
+                .integer("document_id")
+                .notNullable()
+                .references("id")
+                .inTable("documents");
             table.string("filename").notNullable();
             table.integer("version").defaultTo(1);
             table.text("annotations");
@@ -126,7 +131,10 @@ const setupDatabase = async (targetDb: Knex) => {
     }
 
     // 7. Ensure 'annotations' column exists in 'revisions'
-    const hasAnnotations = await targetDb.schema.hasColumn("revisions", "annotations");
+    const hasAnnotations = await targetDb.schema.hasColumn(
+        "revisions",
+        "annotations",
+    );
     if (!hasAnnotations) {
         console.log("Adding annotations column to revisions table...");
         await targetDb.schema.alterTable("revisions", (table) => {
@@ -136,12 +144,35 @@ const setupDatabase = async (targetDb: Knex) => {
     }
 
     // 8. Ensure 'cycle_index' column exists on 'label_print_log'
-    const hasCycleIndex = await targetDb.schema.hasColumn("label_print_log", "cycle_index");
+    const hasCycleIndex = await targetDb.schema.hasColumn(
+        "label_print_log",
+        "cycle_index",
+    );
     if (!hasCycleIndex) {
         console.log("Adding cycle_index column to label_print_log table...");
         await targetDb.schema.alterTable("label_print_log", (table) => {
             table.integer("cycle_index").notNullable().defaultTo(1);
         });
         console.log("Column added.");
+    }
+
+    // 9. order_archive_log table — tracks FINISHED orders so the retention
+    // archival sweep (services/archivalService.ts) knows what's due to be
+    // fetched from doc_manager, converted to PDF/A, and written to the
+    // network archive share, and doesn't reprocess the same order twice.
+    if (!(await targetDb.schema.hasTable("order_archive_log"))) {
+        await targetDb.schema.createTable("order_archive_log", (table) => {
+            table.increments("id").primary();
+            table.string("order_id").notNullable().unique();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.string("sales_order");
+            table.string("product_order");
+            table.timestamp("finished_at").notNullable();
+            table.timestamp("archived_at");
+            table.integer("attempts").notNullable().defaultTo(0);
+            table.text("last_error");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
     }
 };

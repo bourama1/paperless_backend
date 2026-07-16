@@ -1,8 +1,12 @@
 jest.mock("../../config/database");
 jest.mock("../../services/notificationService");
 
-import { getQueue, addToQueue, updateStatus } from "../../controllers/queueController";
-import { getDb, insertGetId } from "../../config/database";
+import {
+    getQueue,
+    addToQueue,
+    updateStatus,
+} from "../../controllers/queueController";
+import { getDb } from "../../config/database";
 import { notifyNewItem } from "../../services/notificationService";
 import { Request, Response } from "express";
 
@@ -30,14 +34,18 @@ describe("Queue Controller", () => {
     describe("getQueue", () => {
         it("should return all documents with revisions", async () => {
             const mockDocs = [{ id: 1, name: "doc1.pdf" }];
-            const mockRevisions = [{ id: 1, document_id: 1, filename: "doc1.pdf", version: 1 }];
+            const mockRevisions = [
+                { id: 1, document_id: 1, filename: "doc1.pdf", version: 1 },
+            ];
 
             const db = jest.fn();
             db.mockImplementation((table: string) => {
                 if (table === "documents") {
                     return { orderBy: () => thenable(mockDocs) };
                 }
-                return { where: () => ({ orderBy: () => thenable(mockRevisions) }) };
+                return {
+                    where: () => ({ orderBy: () => thenable(mockRevisions) }),
+                };
             });
             (getDb as jest.Mock).mockResolvedValue(db);
 
@@ -45,19 +53,26 @@ describe("Queue Controller", () => {
 
             expect(db).toHaveBeenCalledWith("documents");
             expect(db).toHaveBeenCalledWith("revisions");
-            expect(mockJson).toHaveBeenCalledWith([{ ...mockDocs[0], revisions: mockRevisions }]);
+            expect(mockJson).toHaveBeenCalledWith([
+                { ...mockDocs[0], revisions: mockRevisions },
+            ]);
         });
 
         it("should handle errors", async () => {
             const db = jest.fn(() => ({
-                orderBy: () => ({ then: (_: any, reject: Function) => reject(new Error("DB Error")) }),
+                orderBy: () => ({
+                    then: (_: any, reject: Function) =>
+                        reject(new Error("DB Error")),
+                }),
             }));
             (getDb as jest.Mock).mockResolvedValue(db);
 
             await getQueue(mockRequest as Request, mockResponse as Response);
 
             expect(mockStatus).toHaveBeenCalledWith(500);
-            expect(mockJson).toHaveBeenCalledWith({ error: "Internal server error" });
+            expect(mockJson).toHaveBeenCalledWith({
+                error: "Internal server error",
+            });
         });
     });
 
@@ -65,7 +80,9 @@ describe("Queue Controller", () => {
         it("should add a document and its first revision", async () => {
             mockRequest = { body: { filename: "test.pdf" } };
             const mockNewDoc = { id: 1, name: "test.pdf" };
-            const mockRevisions = [{ id: 1, document_id: 1, filename: "test.pdf", version: 1 }];
+            const mockRevisions = [
+                { id: 1, document_id: 1, filename: "test.pdf", version: 1 },
+            ];
 
             const db = jest.fn();
             db.mockReturnValueOnce({
@@ -84,9 +101,15 @@ describe("Queue Controller", () => {
 
             expect(db).toHaveBeenCalledWith("documents");
             expect(db).toHaveBeenCalledWith("revisions");
-            expect(notifyNewItem).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
+            expect(notifyNewItem).toHaveBeenCalledWith({
+                ...mockNewDoc,
+                revisions: mockRevisions,
+            });
             expect(mockStatus).toHaveBeenCalledWith(201);
-            expect(mockJson).toHaveBeenCalledWith({ ...mockNewDoc, revisions: mockRevisions });
+            expect(mockJson).toHaveBeenCalledWith({
+                ...mockNewDoc,
+                revisions: mockRevisions,
+            });
         });
 
         it("should return 400 if filename is missing", async () => {
@@ -95,15 +118,23 @@ describe("Queue Controller", () => {
             await addToQueue(mockRequest as Request, mockResponse as Response);
 
             expect(mockStatus).toHaveBeenCalledWith(400);
-            expect(mockJson).toHaveBeenCalledWith({ error: "Filename is required" });
+            expect(mockJson).toHaveBeenCalledWith({
+                error: "Filename is required",
+            });
         });
     });
 
     describe("updateStatus", () => {
         it("should return 410 Gone as status updates are deprecated", async () => {
-            mockRequest = { params: { id: "1" }, body: { status: "in-progress" } };
+            mockRequest = {
+                params: { id: "1" },
+                body: { status: "in-progress" },
+            };
 
-            await updateStatus(mockRequest as Request, mockResponse as Response);
+            await updateStatus(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
 
             expect(mockStatus).toHaveBeenCalledWith(410);
             expect(mockJson).toHaveBeenCalledWith({

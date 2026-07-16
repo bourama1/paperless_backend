@@ -26,21 +26,27 @@ describe("API Integration Tests", () => {
     describe("GET /queue", () => {
         it("should return 200 and all documents with revisions", async () => {
             const mockDocs = [{ id: 1, name: "test.pdf" }];
-            const mockRevisions = [{ id: 1, document_id: 1, filename: "test.pdf", version: 1 }];
+            const mockRevisions = [
+                { id: 1, document_id: 1, filename: "test.pdf", version: 1 },
+            ];
 
             const db = jest.fn();
             db.mockImplementation((table: string) => {
                 if (table === "documents") {
                     return { orderBy: () => thenable(mockDocs) };
                 }
-                return { where: () => ({ orderBy: () => thenable(mockRevisions) }) };
+                return {
+                    where: () => ({ orderBy: () => thenable(mockRevisions) }),
+                };
             });
             (getDb as jest.Mock).mockResolvedValue(db);
 
             const response = await request(app).get("/queue");
 
             expect(response.status).toBe(200);
-            expect(response.body).toEqual([{ ...mockDocs[0], revisions: mockRevisions }]);
+            expect(response.body).toEqual([
+                { ...mockDocs[0], revisions: mockRevisions },
+            ]);
         });
     });
 

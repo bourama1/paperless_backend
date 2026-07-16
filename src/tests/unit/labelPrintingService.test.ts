@@ -37,10 +37,16 @@ jest.mock("fs", () => {
     return {
         ...actual,
         readFileSync: jest.fn((...args: any[]) => {
-            if (typeof args[0] === "string" && args[0].includes("country-codes.json")) {
+            if (
+                typeof args[0] === "string" &&
+                args[0].includes("country-codes.json")
+            ) {
                 return sampleCountryCodes;
             }
-            if (typeof args[0] === "string" && args[0].includes("label-type-config.json")) {
+            if (
+                typeof args[0] === "string" &&
+                args[0].includes("label-type-config.json")
+            ) {
                 return sampleParametryConfig;
             }
             throw new Error("ENOENT: no such file or directory");
@@ -60,7 +66,10 @@ jest.mock("net", () => ({
     })),
 }));
 
-import { handleLabelPrinting, handleQrSticker } from "../../services/labelPrintingService";
+import {
+    handleLabelPrinting,
+    handleQrSticker,
+} from "../../services/labelPrintingService";
 import { getDb } from "../../config/database";
 import fs from "fs";
 import { OrderUpdate } from "../../services/workstationService";
@@ -72,7 +81,9 @@ function createDbMock() {
         },
     });
     db.mockReturnValue({
-        where: () => ({ first: () => ({ then: (resolve: Function) => resolve(null) }) }),
+        where: () => ({
+            first: () => ({ then: (resolve: Function) => resolve(null) }),
+        }),
         insert: () => ({ then: (resolve: Function) => resolve(undefined) }),
     });
     return db;
@@ -126,7 +137,10 @@ describe("Label Printing Service", () => {
 
     describe("handleLabelPrinting", () => {
         it("should skip if action does not match trigger (STARTED)", async () => {
-            const finishedUpdate = { ...mockOrderUpdate, action: "FINISHED" as const };
+            const finishedUpdate = {
+                ...mockOrderUpdate,
+                action: "FINISHED" as const,
+            };
             await handleLabelPrinting(finishedUpdate);
             expect(fs.existsSync).not.toHaveBeenCalled();
         });
@@ -171,7 +185,8 @@ describe("Label Printing Service", () => {
                     callCount++;
                     return {
                         where: () => ({
-                            first: () => thenable(callCount <= 1 ? { id: 1 } : null),
+                            first: () =>
+                                thenable(callCount <= 1 ? { id: 1 } : null),
                         }),
                         insert: () => thenable(undefined),
                     };
@@ -185,10 +200,13 @@ describe("Label Printing Service", () => {
         });
 
         it("should handle read errors gracefully", async () => {
-            (fs.readFileSync as jest.Mock).mockImplementation((path: string) => {
-                if (path.includes("country-codes.json")) return sampleCountryCodes;
-                throw new Error("Read error");
-            });
+            (fs.readFileSync as jest.Mock).mockImplementation(
+                (path: string) => {
+                    if (path.includes("country-codes.json"))
+                        return sampleCountryCodes;
+                    throw new Error("Read error");
+                },
+            );
 
             await handleLabelPrinting(mockOrderUpdate);
         });
@@ -196,7 +214,11 @@ describe("Label Printing Service", () => {
 
     describe("handleQrSticker", () => {
         it("should skip if not the last cycle", async () => {
-            const midCycleUpdate = { ...mockOrderUpdate, cycleIndex: 2, totalCycles: 4 };
+            const midCycleUpdate = {
+                ...mockOrderUpdate,
+                cycleIndex: 2,
+                totalCycles: 4,
+            };
             await handleQrSticker(midCycleUpdate, []);
         });
 

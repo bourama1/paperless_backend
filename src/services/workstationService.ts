@@ -1,11 +1,14 @@
 import axios from "axios";
 import { getDb } from "../config/database";
 import { handleLabelPrinting } from "./labelPrintingService";
+import { DOCUMENT_TYPES } from "../config/documentTypes";
 
 const WORKSTATIONS_API_URL =
-    process.env.WORKSTATIONS_API_URL || "http://10.110.60.21:40000/api/p2l/services/workstations_process";
+    process.env.WORKSTATIONS_API_URL ||
+    "http://10.110.60.21:40000/api/p2l/services/workstations_process";
 
-const DOC_MANAGER_URL = process.env.DOC_MANAGER_URL || "http://10.110.60.21:40000";
+export const DOC_MANAGER_URL =
+    process.env.DOC_MANAGER_URL || "http://10.110.60.21:40000";
 
 export interface WorkstationProcess {
     workstation: string;
@@ -58,9 +61,12 @@ export interface OrderUpdate {
 
 export const pollWorkstations = async () => {
     try {
-        const response = await axios.get<WorkstationProcess[]>(WORKSTATIONS_API_URL, {
-            timeout: 10000,
-        });
+        const response = await axios.get<WorkstationProcess[]>(
+            WORKSTATIONS_API_URL,
+            {
+                timeout: 10000,
+            },
+        );
         const workstations = response.data;
         const db = await getDb();
 
@@ -68,14 +74,18 @@ export const pollWorkstations = async () => {
             const orderId = ws.order?._id || null;
             const orderData = ws.order ? JSON.stringify(ws.order) : null;
 
-            const existing = await db("workstations").where({ name: ws.workstation }).first();
+            const existing = await db("workstations")
+                .where({ name: ws.workstation })
+                .first();
 
             if (existing) {
-                await db("workstations").where({ name: ws.workstation }).update({
-                    current_order_id: orderId,
-                    current_order_data: orderData,
-                    last_polled_at: db.fn.now(),
-                });
+                await db("workstations")
+                    .where({ name: ws.workstation })
+                    .update({
+                        current_order_id: orderId,
+                        current_order_data: orderData,
+                        last_polled_at: db.fn.now(),
+                    });
             } else {
                 await db("workstations").insert({
                     name: ws.workstation,
@@ -112,15 +122,43 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
             await db("workstations")
                 .where({ name: update.order.workplace })
                 .update({ current_order_id: null, current_order_data: null });
+
+            // Queue this order for retention archival (see services/archivalService.ts).
+            // We only have projectNumber/position to look the document(s) back up in
+            // doc_manager later, same as printDocumentsForOrder does on STARTED — so
+            // skip logging if those aren't present, there'd be nothing to fetch.
+            if (update.order.projectNumber && update.order.position) {
+                await db("order_archive_log")
+                    .insert({
+                        order_id: update.order._id,
+                        project_number: update.order.projectNumber,
+                        position: update.order.position,
+                        sales_order: update.order.salesOrder,
+                        product_order: update.order.productOrder,
+                        finished_at: update.datetime
+                            ? new Date(update.datetime)
+                            : db.fn.now(),
+                    })
+                    .onConflict("order_id")
+                    .ignore();
+            } else {
+                console.log(
+                    `[ARCHIVE] Order ${update.order._id} FINISHED with no projectNumber/position — skipping archival queue`,
+                );
+            }
         }
 
         if (update.action === "STARTED") {
             // Print documents (PBOM, declarations, confirmations) on STARTED
-            printDocumentsForOrder(update.order).catch((err) => console.error("Error printing documents:", err));
+            printDocumentsForOrder(update.order).catch((err) =>
+                console.error("Error printing documents:", err),
+            );
         }
 
         // Trigger label printing (filtered by LABEL_PRINT_TRIGGER inside)
-        handleLabelPrinting(update).catch((err) => console.error("[LABELS] Error in handleLabelPrinting:", err));
+        handleLabelPrinting(update).catch((err) =>
+            console.error("[LABELS] Error in handleLabelPrinting:", err),
+        );
 
         const { io } = require("../index");
         if (io) {
@@ -132,18 +170,15 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
     }
 };
 
-const DOCUMENT_TYPES = {
-    DECLARATION_CONFORMITY: 4,
-    DECLARATION_PERFORMANCE: 5,
-    PBOM_HARDWARE: 14,
-    CONFIRMATION: 21,
-};
-
 async function printDocumentsForOrder(order: OrderUpdate["order"]) {
-    console.log(`Order ${order._id} (${order.productOrder}) at ${order.workplace}. Fetching documents...`);
+    console.log(
+        `Order ${order._id} (${order.productOrder}) at ${order.workplace}. Fetching documents...`,
+    );
 
     if (!order.projectNumber || !order.position) {
-        console.log(`[DOCS] projectNumber or position empty — skipping document fetch for order ${order.productOrder}`);
+        console.log(
+            `[DOCS] projectNumber or position empty — skipping document fetch for order ${order.productOrder}`,
+        );
         return;
     }
 
@@ -151,7 +186,10 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
         const docsToPrint: string[] = [];
 
         const typesCsv = process.env.DOCUMENTS_TYPES || "14,4,5,21";
-        const typeIds = typesCsv.split(",").map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+        const typeIds = typesCsv
+            .split(",")
+            .map((s) => parseInt(s.trim(), 10))
+            .filter((n) => !isNaN(n));
 
         for (const typeId of typeIds) {
             const docs = await fetchDocumentsByType(order, typeId);
@@ -165,7 +203,10 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
     }
 }
 
-async function fetchDocumentsByType(order: OrderUpdate["order"], documentType: number): Promise<string[]> {
+async function fetchDocumentsByType(
+    order: OrderUpdate["order"],
+    documentType: number,
+): Promise<string[]> {
     try {
         const url = `${DOC_MANAGER_URL}/api/documents/fetch`;
         const response = await axios.get<{ file_path: string }[]>(url, {
@@ -222,14 +263,17 @@ export const importDocument = async (req: PbomImportRequest) => {
     });
     const cd = headRes.headers["content-disposition"] || "";
     const fileNameMatch = cd.match(/filename="?(.+?)"?$/);
-    const originalName =
-        fileNameMatch ? fileNameMatch[1]!.trim() : `P${req.projectNumber}_${req.position}_Hardware.pdf`;
+    const originalName = fileNameMatch
+        ? fileNameMatch[1]!.trim()
+        : `P${req.projectNumber}_${req.position}_Hardware.pdf`;
     headRes.data.destroy();
 
     const docRef = `docmgr://${req.projectNumber}/${req.position}/${docType}`;
 
     const db = await getDb();
-    const [docId] = await db("documents").insert({ name: originalName }).returning("id");
+    const [docId] = await db("documents")
+        .insert({ name: originalName })
+        .returning("id");
     const resolvedDocId = typeof docId === "object" ? docId.id : docId;
 
     await db("revisions").insert({
@@ -239,31 +283,42 @@ export const importDocument = async (req: PbomImportRequest) => {
     });
 
     const newDoc = await db("documents").where({ id: resolvedDocId }).first();
-    const revisions = await db("revisions").where({ document_id: resolvedDocId }).orderBy("version", "desc");
+    const revisions = await db("revisions")
+        .where({ document_id: resolvedDocId })
+        .orderBy("version", "desc");
 
     return { ...newDoc, revisions };
 };
 
 const CUSTOMER_PRODUCTION = 0;
 
-export const searchPbom = async (orderCode: string): Promise<PbomSearchResult[]> => {
+export const searchPbom = async (
+    orderCode: string,
+): Promise<PbomSearchResult[]> => {
     const results: PbomSearchResult[] = [];
     const searchStr = String(orderCode);
 
     try {
-        const ordersRes = await axios.get<unknown>(`${DOC_MANAGER_URL}/api/customers/${CUSTOMER_PRODUCTION}/orders`, {
-            timeout: 10000,
-        });
+        const ordersRes = await axios.get<unknown>(
+            `${DOC_MANAGER_URL}/api/customers/${CUSTOMER_PRODUCTION}/orders`,
+            {
+                timeout: 10000,
+            },
+        );
         const orders = Array.isArray(ordersRes.data) ? ordersRes.data : [];
 
-        const matchingOrder = orders.find((o: unknown) => String(o).includes(searchStr));
+        const matchingOrder = orders.find((o: unknown) =>
+            String(o).includes(searchStr),
+        );
         if (matchingOrder === undefined) return results;
 
         const positionsRes = await axios.get<unknown>(
             `${DOC_MANAGER_URL}/api/orders/${CUSTOMER_PRODUCTION}/${matchingOrder}/positions`,
             { timeout: 5000 },
         );
-        const positions = Array.isArray(positionsRes.data) ? positionsRes.data : [];
+        const positions = Array.isArray(positionsRes.data)
+            ? positionsRes.data
+            : [];
 
         for (const pos of positions) {
             try {
@@ -277,7 +332,10 @@ export const searchPbom = async (orderCode: string): Promise<PbomSearchResult[]>
                 });
                 results.push({
                     customer_code: CUSTOMER_PRODUCTION,
-                    order_code: typeof matchingOrder === "number" ? matchingOrder : Number(matchingOrder),
+                    order_code:
+                        typeof matchingOrder === "number"
+                            ? matchingOrder
+                            : Number(matchingOrder),
                     position_code: typeof pos === "number" ? pos : Number(pos),
                 });
             } catch {
@@ -291,9 +349,14 @@ export const searchPbom = async (orderCode: string): Promise<PbomSearchResult[]>
     return results;
 };
 
-async function triggerPrinting(filePaths: string[], order: OrderUpdate["order"]) {
+async function triggerPrinting(
+    filePaths: string[],
+    order: OrderUpdate["order"],
+) {
     if (filePaths.length === 0) {
-        console.log(`[PRINT] No documents to print for order ${order.productOrder}`);
+        console.log(
+            `[PRINT] No documents to print for order ${order.productOrder}`,
+        );
         return;
     }
 
@@ -320,6 +383,10 @@ async function triggerPrinting(filePaths: string[], order: OrderUpdate["order"])
     for (const fp of filePaths) {
         const psCommand = `Start-Process -FilePath "${fp}" -Verb Print -WindowStyle Hidden`;
         console.log(`  - ${fp}`);
-        await execFileAsync("powershell.exe", ["-NoProfile", "-Command", psCommand]);
+        await execFileAsync("powershell.exe", [
+            "-NoProfile",
+            "-Command",
+            psCommand,
+        ]);
     }
 }

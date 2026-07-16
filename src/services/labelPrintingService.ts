@@ -125,21 +125,29 @@ function resolveScanPrefix(workplace: string): string | undefined {
 const LABEL_PRINT_TRIGGER = process.env.LABEL_PRINT_TRIGGER || "STARTED";
 const PRINTER_HOST = process.env.LABEL_PRINTER_HOST || "";
 const PRINTER_PORT = parseInt(process.env.LABEL_PRINTER_PORT || "9100", 10);
-const COPIES_OVERRIDE = process.env.LABEL_PRINTER_COPIES ? parseInt(process.env.LABEL_PRINTER_COPIES, 10) : null;
+const COPIES_OVERRIDE = process.env.LABEL_PRINTER_COPIES
+    ? parseInt(process.env.LABEL_PRINTER_COPIES, 10)
+    : null;
 
 // UNC path as mounted on this Linux server (cifs/samba)
 // On Windows the share is  n:\300 Departments\999 Common\01-FFS-Test\Štítky
 // which maps to UNC        \\TOCZ-FS2\510-TOCZ\300 Departments\999 Common\01-FFS-Test\Štítky
 const CSV_BASE_PATH =
-    process.env.LABEL_CSV_BASE_PATH || "\\\\TOCZ-FS2\\510-TOCZ\\300 Departments\\999 Common\\01-FFS-Test\\Štítky";
+    process.env.LABEL_CSV_BASE_PATH ||
+    "\\\\TOCZ-FS2\\510-TOCZ\\300 Departments\\999 Common\\01-FFS-Test\\Štítky";
 
 // When packaged as a standalone .exe (pkg), __dirname = exe directory, not dist/
-const cfgDir =
-    (process as any).pkg ? path.join(path.dirname(process.execPath), "config") : path.join(__dirname, "../../config");
+const cfgDir = (process as any).pkg
+    ? path.join(path.dirname(process.execPath), "config")
+    : path.join(__dirname, "../../config");
 
-const COUNTRY_CODES_PATH = process.env.LABEL_COUNTRY_CODES_PATH || path.join(cfgDir, "country-codes.json");
+const COUNTRY_CODES_PATH =
+    process.env.LABEL_COUNTRY_CODES_PATH ||
+    path.join(cfgDir, "country-codes.json");
 
-const LABEL_TYPE_CONFIG_PATH = process.env.LABEL_TYPE_CONFIG_PATH || path.join(cfgDir, "label-type-config.json");
+const LABEL_TYPE_CONFIG_PATH =
+    process.env.LABEL_TYPE_CONFIG_PATH ||
+    path.join(cfgDir, "label-type-config.json");
 
 // Loaded once at startup, reloaded automatically if the file changes
 let countryCodeMap: Record<string, string> = {};
@@ -149,15 +157,16 @@ function loadCountryCodes() {
         const raw = fs.readFileSync(COUNTRY_CODES_PATH, "utf-8");
         const parsed = JSON.parse(raw);
         // Strip the _comment/_format/_examples meta keys
-        countryCodeMap = Object.fromEntries(Object.entries(parsed).filter(([k]) => !k.startsWith("_"))) as Record<
-            string,
-            string
-        >;
+        countryCodeMap = Object.fromEntries(
+            Object.entries(parsed).filter(([k]) => !k.startsWith("_")),
+        ) as Record<string, string>;
         console.log(
             `[LABELS] Loaded ${Object.keys(countryCodeMap).length} country code mappings from ${COUNTRY_CODES_PATH}`,
         );
     } catch (err: any) {
-        console.error(`[LABELS] Failed to load country codes from ${COUNTRY_CODES_PATH}: ${err.message}`);
+        console.error(
+            `[LABELS] Failed to load country codes from ${COUNTRY_CODES_PATH}: ${err.message}`,
+        );
     }
 }
 
@@ -193,9 +202,13 @@ function loadParametryConfig() {
     try {
         const raw = fs.readFileSync(LABEL_TYPE_CONFIG_PATH, "utf-8");
         parametryConfig = JSON.parse(raw);
-        console.log(`[LABELS] Loaded ${parametryConfig.length} parametry entries from ${LABEL_TYPE_CONFIG_PATH}`);
+        console.log(
+            `[LABELS] Loaded ${parametryConfig.length} parametry entries from ${LABEL_TYPE_CONFIG_PATH}`,
+        );
     } catch (err: any) {
-        console.error(`[LABELS] Failed to load parametry config from ${LABEL_TYPE_CONFIG_PATH}: ${err.message}`);
+        console.error(
+            `[LABELS] Failed to load parametry config from ${LABEL_TYPE_CONFIG_PATH}: ${err.message}`,
+        );
         parametryConfig = [];
     }
 }
@@ -312,7 +325,11 @@ const LABEL_CONFIG: Record<string, LabelTypeConfig> = {
     t25_spol: { template: "aktualniCMD", copies: 2, cycleFilter: null },
     t71_md: { template: "aktualniCMD", copies: 2, cycleFilter: null },
     rail: { template: "aktualniCMD", copies: 1, cycleFilter: null },
-    "triang. plate": { template: "aktualniCMD", copies: 1, cycleFilter: "last" },
+    "triang. plate": {
+        template: "aktualniCMD",
+        copies: 1,
+        cycleFilter: "last",
+    },
     "sleve profile": { template: "aktualniCMD", copies: 1, cycleFilter: null },
     strut: { template: "aktualniCMD", copies: 1, cycleFilter: null },
     springs: { template: "aktualniCMD", copies: 1, cycleFilter: null },
@@ -340,7 +357,8 @@ const LABEL_CONFIG: Record<string, LabelTypeConfig> = {
 export function resolveConfig(labelType: string): LabelTypeConfig {
     if (LABEL_CONFIG[labelType]) return LABEL_CONFIG[labelType]!;
     // Catch-all for any *_hw_kr suffix not explicitly listed
-    if (labelType.endsWith("_hw_kr")) return { template: "aktualniCMDinter", copies: 1, cycleFilter: "last" };
+    if (labelType.endsWith("_hw_kr"))
+        return { template: "aktualniCMDinter", copies: 1, cycleFilter: "last" };
     return { template: "aktualniCMD", copies: 1, cycleFilter: null };
 }
 
@@ -456,8 +474,12 @@ function countryCode(deliveryCountry: string): string {
     // Fallback: mapping file lookup
     if (countryCodeMap[key]) return countryCodeMap[key]!;
 
-    console.warn(`[LABELS] Unknown deliveryCountry value "${key}" – add it to country-codes.json`);
-    return beforePipe.slice(0, 2).toUpperCase() || key.slice(0, 2).toUpperCase();
+    console.warn(
+        `[LABELS] Unknown deliveryCountry value "${key}" – add it to country-codes.json`,
+    );
+    return (
+        beforePipe.slice(0, 2).toUpperCase() || key.slice(0, 2).toUpperCase()
+    );
 }
 
 // Fixed border lines — identical on every label (from captured .prn)
@@ -570,7 +592,9 @@ function generatePrimaryBlock(label: LabelRow): string {
         `AE,22,164,2,2,0,0,${ezplValue(label.salesOrder)}`,
         `AE,22,233,2,2,0,0,${pos3}`,
         `AE,151,345,1,1,0,0,${ezplValue(label.packageType)}`,
-        ...(label.weight && label.weight !== "0" ? [`AE,4,345,1,1,0,0,${ezplValue(label.weight)}kg`] : [""]),
+        ...(label.weight && label.weight !== "0"
+            ? [`AE,4,345,1,1,0,0,${ezplValue(label.weight)}kg`]
+            : [""]),
         `AC,9,491,2,2,0,0,${ezplValue(dName1)}`,
         `AC,9,569,2,2,0,0,${ezplValue(dName2)}`,
         `AB,11,672,2,2,0,0,${ezplValue(label.deliveryAddress)}`,
@@ -645,8 +669,14 @@ function needsOutsideEuLabel(label: LabelRow): boolean {
  * This function returns the concatenation of both when applicable.
  */
 export function generateEzpl(label: LabelRow, template: string): Buffer {
-    const block = template === "aktualniCMDinter" ? generateSimpleBlock(label) : generatePrimaryBlock(label);
-    const extra = template === "aktualniCMD" && needsOutsideEuLabel(label) ? "\n" + generateOutsideEuBlock(label) : "";
+    const block =
+        template === "aktualniCMDinter"
+            ? generateSimpleBlock(label)
+            : generatePrimaryBlock(label);
+    const extra =
+        template === "aktualniCMD" && needsOutsideEuLabel(label)
+            ? "\n" + generateOutsideEuBlock(label)
+            : "";
     return Buffer.from(block + extra + "\n", "latin1");
 }
 
@@ -675,7 +705,10 @@ async function sendViaWindowsCopy(ezplData: Buffer): Promise<void> {
     const os = await import("os");
     const execFileAsync = promisify(execFile);
 
-    const tmpFile = path.join(os.tmpdir(), `label_${Date.now()}_${Math.random().toString(36).slice(2)}.prn`);
+    const tmpFile = path.join(
+        os.tmpdir(),
+        `label_${Date.now()}_${Math.random().toString(36).slice(2)}.prn`,
+    );
     fs.writeFileSync(tmpFile, ezplData);
 
     try {
@@ -683,8 +716,10 @@ async function sendViaWindowsCopy(ezplData: Buffer): Promise<void> {
         const cmd = `copy /b "${tmpFile}" "${PRINTER_UNC_PATH}"`;
         console.log(`[LABELS] cmd.exe /c ${cmd}`);
         const { stdout, stderr } = await execFileAsync("cmd.exe", ["/c", cmd]);
-        if (stderr && stderr.trim()) console.warn(`[LABELS] copy stderr: ${stderr.trim()}`);
-        if (stdout && stdout.trim()) console.log(`[LABELS] copy stdout: ${stdout.trim()}`);
+        if (stderr && stderr.trim())
+            console.warn(`[LABELS] copy stderr: ${stderr.trim()}`);
+        if (stdout && stdout.trim())
+            console.log(`[LABELS] copy stdout: ${stdout.trim()}`);
     } finally {
         fs.unlink(tmpFile, () => {}); // best-effort cleanup
     }
@@ -730,7 +765,9 @@ async function sendToLabelPrinter(ezplData: Buffer): Promise<void> {
     if (PRINTER_HOST) {
         return sendViaTcp(ezplData);
     }
-    console.warn("[LABELS] Neither LABEL_PRINTER_UNC_PATH nor LABEL_PRINTER_HOST set – skipping print");
+    console.warn(
+        "[LABELS] Neither LABEL_PRINTER_UNC_PATH nor LABEL_PRINTER_HOST set – skipping print",
+    );
 }
 
 // ─── duplicate guard (PostgreSQL via Knex) ────────────────────────────────────
@@ -753,9 +790,22 @@ async function ensurePrintLogTable() {
             table.timestamp("printed_at").defaultTo(db.fn.now());
         });
     }
+    // Note: if the table already exists without cycle_index, config/database.ts's
+    // startup migration (step 8) is responsible for adding the column — this
+    // function only handles the fresh-install case.
 }
 
-async function isAlreadyPrinted(orderId: string, row: LabelRow, cycleIndex: number): Promise<boolean> {
+// Duplicate guard is keyed per-cycle. Label rows for shared items configured
+// with cycleFilter === null are meant to print on EVERY cycle (see
+// selectRowsForCycle's doc comment above) and have identical
+// label_type/package_part/package_type across cycles since they carry no
+// door number — without cycle_index in the key, cycle 2+ would always look
+// like a duplicate of cycle 1 and get skipped.
+async function isAlreadyPrinted(
+    orderId: string,
+    row: LabelRow,
+    cycleIndex: number,
+): Promise<boolean> {
     const db = await getDb();
     const hit = await db("label_print_log")
         .where({
@@ -769,7 +819,12 @@ async function isAlreadyPrinted(orderId: string, row: LabelRow, cycleIndex: numb
     return !!hit;
 }
 
-async function recordPrint(orderId: string, row: LabelRow, copies: number, cycleIndex: number) {
+async function recordPrint(
+    orderId: string,
+    row: LabelRow,
+    copies: number,
+    cycleIndex: number,
+) {
     const db = await getDb();
     await db("label_print_log").insert({
         order_id: orderId,
@@ -827,7 +882,10 @@ function getCycleFilter(labelType: string): CycleFilter {
     return resolveConfig(labelType).cycleFilter;
 }
 
-export function selectRowsForCycle(labelRows: LabelRow[], barcodeLastDigit: string): LabelRow[] {
+export function selectRowsForCycle(
+    labelRows: LabelRow[],
+    barcodeLastDigit: string,
+): LabelRow[] {
     return labelRows.filter((row) => {
         const cf = getCycleFilter(row.labelType);
         if (cf === "first") return barcodeLastDigit === "1";
@@ -840,7 +898,9 @@ export function selectRowsForCycle(labelRows: LabelRow[], barcodeLastDigit: stri
 
 export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     if (update.action !== LABEL_PRINT_TRIGGER) {
-        console.log(`[LABELS] action=${update.action} – not trigger (${LABEL_PRINT_TRIGGER}), skip`);
+        console.log(
+            `[LABELS] action=${update.action} – not trigger (${LABEL_PRINT_TRIGGER}), skip`,
+        );
         return;
     }
     const prefix = resolveScanPrefix(update.order.workplace);
@@ -856,7 +916,9 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     await ensurePrintLogTable();
 
     const { order } = update;
-    console.log(`[LABELS] Order ${order.productOrder} (${order.salesOrder}/${order.position})`);
+    console.log(
+        `[LABELS] Order ${order.productOrder} (${order.salesOrder}/${order.position})`,
+    );
 
     let labelRows: LabelRow[];
     try {
@@ -874,7 +936,10 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     // Parametry matching — mirrors VBA scan of parametry sheet, but keyed off
     // the workplace-derived prefix instead of a physically-scanned barcode.
     // Find ALL matching parametry entries (not just the last one).
-    const matchingTypes = new Map<string, { copies: number; cycleFilter: CycleFilter }>();
+    const matchingTypes = new Map<
+        string,
+        { copies: number; cycleFilter: CycleFilter }
+    >();
     for (const entry of parametryConfig) {
         if (entry.scanC === prefix) {
             matchingTypes.set(entry.type, {
@@ -891,23 +956,31 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         return;
     }
 
-    console.log(`[LABELS] workplace="${order.workplace}" → ${matchingTypes.size} matching types in parametry`);
+    console.log(
+        `[LABELS] workplace="${order.workplace}" → ${matchingTypes.size} matching types in parametry`,
+    );
 
     // Keep only CSV rows whose type exists in the parametry match set.
     labelRows = labelRows.filter((row) => matchingTypes.has(row.labelType));
     if (labelRows.length === 0) {
-        console.log(`[LABELS] No CSV rows match parametry types for this barcode, nothing to print`);
+        console.log(
+            `[LABELS] No CSV rows match parametry types for this barcode, nothing to print`,
+        );
         return;
     }
 
     const { cycleIndex, totalCycles } = update;
     const isFirstCycle = cycleIndex === 1;
     const isLastCycle = cycleIndex === totalCycles;
-    console.log(`[LABELS] cycle ${cycleIndex}/${totalCycles} (first=${isFirstCycle}, last=${isLastCycle})`);
+    console.log(
+        `[LABELS] cycle ${cycleIndex}/${totalCycles} (first=${isFirstCycle}, last=${isLastCycle})`,
+    );
 
     // Build a set of all known parametry types for CSV row filtering
     const allParametryTypes = new Set(parametryConfig.map((e: any) => e.type));
-    const cycleRows = labelRows.filter((r) => allParametryTypes.has(r.labelType));
+    const cycleRows = labelRows.filter((r) =>
+        allParametryTypes.has(r.labelType),
+    );
 
     console.log(
         `[LABELS] ${cycleRows.length} rows for cycle ${cycleIndex}/${totalCycles} (${labelRows.length} matching in CSV)`,
@@ -933,7 +1006,9 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 
             // Duplicate guard – mirrors Databaze sheet check in VBA, scoped to this cycle
             if (await isAlreadyPrinted(order._id, row, cycleIndex)) {
-                console.log(`[LABELS] SKIP already printed: ${row.labelType} ${row.packagePart} ${row.packageType}`);
+                console.log(
+                    `[LABELS] SKIP already printed: ${row.labelType} ${row.packagePart} ${row.packageType}`,
+                );
                 skipped++;
                 continue;
             }
@@ -965,12 +1040,16 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                         `${config.template} – ${row.labelType} ${row.packagePart} ${row.packageType}`,
                 );
             } catch (err: any) {
-                console.error(`[LABELS] Error printing ${row.labelType}: ${err.message}`);
+                console.error(
+                    `[LABELS] Error printing ${row.labelType}: ${err.message}`,
+                );
             }
         }
     }
 
-    console.log(`[LABELS] Done – printed: ${printed}, skipped: ${skipped}, total: ${cycleRows.length}`);
+    console.log(
+        `[LABELS] Done – printed: ${printed}, skipped: ${skipped}, total: ${cycleRows.length}`,
+    );
 
     // QR sticker – last cycle only, mirrors TiskQRKodu
     try {
@@ -1094,7 +1173,9 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
     }
 
     if (!railType) {
-        console.warn(`[QR] Could not find rail type (6210610) in ${filePath} for position ${position}`);
+        console.warn(
+            `[QR] Could not find rail type (6210610) in ${filePath} for position ${position}`,
+        );
         return null;
     }
 
@@ -1113,7 +1194,9 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
  */
 async function printQrPng(pngPath: string, copies: number): Promise<void> {
     if (!QR_PRINTER) {
-        console.log(`[QR] No printer configured — would print ${copies}x "${pngPath}"`);
+        console.log(
+            `[QR] No printer configured — would print ${copies}x "${pngPath}"`,
+        );
         return;
     }
 
@@ -1145,7 +1228,9 @@ async function printQrPng(pngPath: string, copies: number): Promise<void> {
                     reject(new Error("QR printer timed out"));
                 });
             });
-            console.log(`[QR] Sent via TCP ${QR_PRINTER}:9100 (copy ${i + 1}/${copies})`);
+            console.log(
+                `[QR] Sent via TCP ${QR_PRINTER}:9100 (copy ${i + 1}/${copies})`,
+            );
         } else {
             let psCommand: string;
             if (QR_PRINTER) {
@@ -1154,7 +1239,11 @@ async function printQrPng(pngPath: string, copies: number): Promise<void> {
                 psCommand = `Start-Process -FilePath "${pngPath}" -Verb Print -WindowStyle Hidden`;
             }
             console.log(`[QR] ${psCommand} (copy ${i + 1}/${copies})`);
-            await execFileAsync("powershell.exe", ["-NoProfile", "-Command", psCommand]);
+            await execFileAsync("powershell.exe", [
+                "-NoProfile",
+                "-Command",
+                psCommand,
+            ]);
         }
     }
 }
@@ -1163,16 +1252,23 @@ async function printQrPng(pngPath: string, copies: number): Promise<void> {
  * Main QR sticker handler — called only on the last cycle.
  * Mirrors TiskQRKodu from QRKody.bas.
  */
-export async function handleQrSticker(update: OrderUpdate, labelRows: LabelRow[]): Promise<void> {
+export async function handleQrSticker(
+    update: OrderUpdate,
+    labelRows: LabelRow[],
+): Promise<void> {
     const { order, cycleIndex, totalCycles } = update;
 
     // Only on the last cycle (VBA: Right(nactenyKodCely, 1) = 0 → last scan of position)
     if (cycleIndex !== totalCycles) return;
 
     // Find the TMP*.TXT filename from the CSV rows (col 13, any row that has it)
-    const tmpFile = labelRows.find((r) => r.tmpFile?.toLowerCase().startsWith("tmp"))?.tmpFile;
+    const tmpFile = labelRows.find((r) =>
+        r.tmpFile?.toLowerCase().startsWith("tmp"),
+    )?.tmpFile;
     if (!tmpFile) {
-        console.log("[QR] No TMP file reference in CSV rows, skipping QR sticker");
+        console.log(
+            "[QR] No TMP file reference in CSV rows, skipping QR sticker",
+        );
         return;
     }
 
@@ -1190,12 +1286,16 @@ export async function handleQrSticker(update: OrderUpdate, labelRows: LabelRow[]
 
     const qrName = QR_CODE_MAP[data.railType];
     if (!qrName) {
-        console.warn(`[QR] Unknown rail type "${data.railType}" – no QR mapping found`);
+        console.warn(
+            `[QR] Unknown rail type "${data.railType}" – no QR mapping found`,
+        );
         return;
     }
 
     if (!QR_IMAGES_PATH) {
-        console.log(`[QR] [DRY RUN] Would print ${data.doorCount}x ${qrName}.png (rail: ${data.railType})`);
+        console.log(
+            `[QR] [DRY RUN] Would print ${data.doorCount}x ${qrName}.png (rail: ${data.railType})`,
+        );
         return;
     }
 
@@ -1205,6 +1305,8 @@ export async function handleQrSticker(update: OrderUpdate, labelRows: LabelRow[]
         return;
     }
 
-    console.log(`[QR] Printing ${data.doorCount}x ${qrName}.png for rail type "${data.railType}"`);
+    console.log(
+        `[QR] Printing ${data.doorCount}x ${qrName}.png for rail type "${data.railType}"`,
+    );
     await printQrPng(pngPath, data.doorCount);
 }
