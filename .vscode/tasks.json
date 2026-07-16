@@ -79,6 +79,16 @@
             "group": "build",
             "problemMatcher": [],
             "detail": "Compile TS + create standalone paperless-backend.exe"
+        },
+        {
+            "label": "Format all files",
+            "type": "shell",
+            "command": "npm run format",
+            "options": {
+                "cwd": "${workspaceFolder}"
+            },
+            "problemMatcher": [],
+            "detail": "Format all .ts files with Prettier"
         }
     ],
     "inputs": [
