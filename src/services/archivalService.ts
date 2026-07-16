@@ -1,0 +1,238 @@
+import axios from "axios";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import crypto from "crypto";
+import { getDb } from "../config/database";
+import { DOC_MANAGER_URL } from "./workstationService";
+import { documentTypeName } from "../config/documentTypes";
+import { convertToPdfA, PdfaConversionError } from "./pdfaService";
+
+// Network share where archived PDF/A copies are written, e.g.
+//   \\FILESERVER\Archive          (Windows UNC)
+//   /mnt/archive                  (Linux mount)
+// Required — if unset, the sweep logs a warning and does nothing rather than
+// silently writing archives somewhere unexpected.
+const ARCHIVE_SHARE_PATH = process.env.ARCHIVE_SHARE_PATH || "";
+
+// How many days after an order finishes it becomes eligible for archival.
+const RETENTION_DAYS = parseInt(process.env.ARCHIVE_RETENTION_DAYS || "7", 10);
+
+// Which doc_manager document types to archive per order. Same env-driven
+// list style as workstationService's DOCUMENTS_TYPES (printing on STARTED).
+const ARCHIVE_DOCUMENT_TYPES = (
+    process.env.ARCHIVE_DOCUMENT_TYPES || "14,4,5,21"
+)
+    .split(",")
+    .map((s) => parseInt(s.trim(), 10))
+    .filter((n) => !isNaN(n));
+
+// How often the sweep runs. Archival isn't time-critical (it's driven by a
+// multi-day retention window), so this defaults to every 6 hours rather
+// than polling frequently like pollWorkstations does.
+export const ARCHIVE_POLL_INTERVAL_MS = parseInt(
+    process.env.ARCHIVE_POLL_INTERVAL_MS || String(6 * 60 * 60 * 1000),
+    10,
+);
+
+// Stop retrying an order after this many failed sweep attempts, so a
+// permanently-broken order (e.g. doc_manager 500s forever for it) doesn't
+// get retried every sweep, forever, without anyone noticing.
+const MAX_ATTEMPTS = parseInt(process.env.ARCHIVE_MAX_ATTEMPTS || "5", 10);
+
+let warnedMissingSharePath = false;
+let sweepInFlight = false;
+
+interface ArchiveLogRow {
+    id: number;
+    order_id: string;
+    project_number: string;
+    position: string;
+    sales_order: string | null;
+    product_order: string | null;
+    finished_at: string | Date;
+    attempts: number;
+}
+
+/**
+ * Downloads a single document from doc_manager for the given order/type,
+ * mirroring the same request shape workstationService.importDocument uses
+ * (GET .../api/documents/fetch with responseType stream, filename parsed
+ * from Content-Disposition). Returns null if doc_manager has no document of
+ * this type for this order (a 404), which is a normal, non-fatal outcome —
+ * not every order has every document type.
+ */
+async function fetchDocumentBuffer(
+    projectNumber: string,
+    position: string,
+    documentType: number,
+): Promise<{ buffer: Buffer; filename: string } | null> {
+    const url = `${DOC_MANAGER_URL}/api/documents/fetch`;
+    try {
+        const response = await axios.get(url, {
+            params: {
+                order_code: projectNumber,
+                position_code: position,
+                document_type: documentType,
+            },
+            responseType: "arraybuffer",
+            timeout: 30_000,
+            validateStatus: (status) => status === 200 || status === 404,
+        });
+
+        if (response.status === 404) {
+            return null;
+        }
+
+        const cd = (response.headers["content-disposition"] as string) || "";
+        const fileNameMatch = cd.match(/filename="?(.+?)"?$/);
+        const filename = fileNameMatch
+            ? fileNameMatch[1]!.trim()
+            : `${projectNumber}_${position}_${documentType}.pdf`;
+
+        return { buffer: Buffer.from(response.data), filename };
+    } catch (error: any) {
+        if (error?.response?.status === 404) {
+            return null;
+        }
+        throw error;
+    }
+}
+
+/**
+ * Archives one finished order: fetches every configured document type from
+ * doc_manager, converts each to real PDF/A, and writes it to
+ * ARCHIVE_SHARE_PATH/{projectNumber}/{position}/{type}_pdfa.pdf.
+ *
+ * Missing document types (doc_manager 404) are skipped, not fatal — an
+ * order legitimately might not have every type. A hard failure (network
+ * error, Ghostscript failure, etc.) throws so the caller can record it and
+ * retry on the next sweep.
+ */
+async function archiveOrder(
+    row: ArchiveLogRow,
+): Promise<{ archivedCount: number }> {
+    const orderDir = path.join(
+        ARCHIVE_SHARE_PATH,
+        row.project_number,
+        row.position,
+    );
+    let archivedCount = 0;
+
+    for (const documentType of ARCHIVE_DOCUMENT_TYPES) {
+        const doc = await fetchDocumentBuffer(
+            row.project_number,
+            row.position,
+            documentType,
+        );
+        if (!doc) {
+            console.log(
+                `[ARCHIVE] No document of type ${documentType} for order ${row.order_id} ` +
+                    `(${row.project_number}/${row.position}) — skipping`,
+            );
+            continue;
+        }
+
+        const tmpInputPath = path.join(
+            os.tmpdir(),
+            `archive-src-${crypto.randomBytes(8).toString("hex")}.pdf`,
+        );
+        fs.writeFileSync(tmpInputPath, doc.buffer);
+
+        try {
+            const outputFilename = `${documentTypeName(documentType)}_pdfa.pdf`;
+            const outputPath = path.join(orderDir, outputFilename);
+
+            await convertToPdfA(tmpInputPath, outputPath, {
+                title: doc.filename,
+            });
+
+            console.log(
+                `[ARCHIVE] Wrote ${outputPath} for order ${row.order_id}`,
+            );
+            archivedCount++;
+        } finally {
+            fs.unlink(tmpInputPath, () => {});
+        }
+    }
+
+    return { archivedCount };
+}
+
+/**
+ * Finds FINISHED orders whose retention window has elapsed and haven't
+ * been successfully archived yet, and archives each of them. Safe to call
+ * repeatedly — already-archived orders and orders still within the
+ * retention window are skipped, and only one sweep runs at a time.
+ */
+export async function runArchivalSweep(): Promise<void> {
+    if (!ARCHIVE_SHARE_PATH) {
+        if (!warnedMissingSharePath) {
+            console.warn(
+                "[ARCHIVE] ARCHIVE_SHARE_PATH is not set — retention archival is disabled. " +
+                    "Set it to a network share path (e.g. \\\\FILESERVER\\Archive) to enable it.",
+            );
+            warnedMissingSharePath = true;
+        }
+        return;
+    }
+
+    if (sweepInFlight) {
+        console.log("[ARCHIVE] Sweep already in progress, skipping this tick");
+        return;
+    }
+    sweepInFlight = true;
+
+    try {
+        const db = await getDb();
+        const cutoff = new Date(
+            Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000,
+        );
+
+        const dueRows: ArchiveLogRow[] = await db("order_archive_log")
+            .whereNull("archived_at")
+            .andWhere("finished_at", "<=", cutoff)
+            .andWhere("attempts", "<", MAX_ATTEMPTS)
+            .orderBy("finished_at", "asc");
+
+        if (dueRows.length === 0) {
+            console.log("[ARCHIVE] No orders due for archival");
+            return;
+        }
+
+        console.log(
+            `[ARCHIVE] ${dueRows.length} order(s) due for archival (retention: ${RETENTION_DAYS} days)`,
+        );
+
+        for (const row of dueRows) {
+            try {
+                const { archivedCount } = await archiveOrder(row);
+                await db("order_archive_log").where({ id: row.id }).update({
+                    archived_at: db.fn.now(),
+                    last_error: null,
+                });
+                console.log(
+                    `[ARCHIVE] Order ${row.order_id} archived (${archivedCount}/${ARCHIVE_DOCUMENT_TYPES.length} document types found)`,
+                );
+            } catch (error: any) {
+                const message =
+                    error instanceof PdfaConversionError
+                        ? error.message
+                        : error?.message || String(error);
+                console.error(
+                    `[ARCHIVE] Failed to archive order ${row.order_id} (attempt ${row.attempts + 1}): ${message}`,
+                );
+                await db("order_archive_log")
+                    .where({ id: row.id })
+                    .update({
+                        attempts: row.attempts + 1,
+                        last_error: message.slice(0, 2000),
+                    });
+            }
+        }
+    } catch (error) {
+        console.error("[ARCHIVE] Error running archival sweep:", error);
+    } finally {
+        sweepInFlight = false;
+    }
+}
