@@ -98,6 +98,7 @@ const setupDatabase = async (targetDb: Knex) => {
             table.string("package_type").notNullable();
             table.string("toors_barcode");
             table.integer("copies").notNullable().defaultTo(1);
+            table.integer("cycle_index").notNullable().defaultTo(1);
             table.timestamp("printed_at").defaultTo(targetDb.fn.now());
         });
     }
@@ -130,6 +131,16 @@ const setupDatabase = async (targetDb: Knex) => {
         console.log("Adding annotations column to revisions table...");
         await targetDb.schema.alterTable("revisions", (table) => {
             table.text("annotations");
+        });
+        console.log("Column added.");
+    }
+
+    // 8. Ensure 'cycle_index' column exists on 'label_print_log'
+    const hasCycleIndex = await targetDb.schema.hasColumn("label_print_log", "cycle_index");
+    if (!hasCycleIndex) {
+        console.log("Adding cycle_index column to label_print_log table...");
+        await targetDb.schema.alterTable("label_print_log", (table) => {
+            table.integer("cycle_index").notNullable().defaultTo(1);
         });
         console.log("Column added.");
     }

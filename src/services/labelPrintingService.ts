@@ -749,12 +749,13 @@ async function ensurePrintLogTable() {
             table.string("package_type").notNullable();
             table.string("toors_barcode");
             table.integer("copies").notNullable().defaultTo(1);
+            table.integer("cycle_index").notNullable().defaultTo(1);
             table.timestamp("printed_at").defaultTo(db.fn.now());
         });
     }
 }
 
-async function isAlreadyPrinted(orderId: string, row: LabelRow): Promise<boolean> {
+async function isAlreadyPrinted(orderId: string, row: LabelRow, cycleIndex: number): Promise<boolean> {
     const db = await getDb();
     const hit = await db("label_print_log")
         .where({
@@ -762,12 +763,13 @@ async function isAlreadyPrinted(orderId: string, row: LabelRow): Promise<boolean
             label_type: row.labelType,
             package_part: row.packagePart,
             package_type: row.packageType,
+            cycle_index: cycleIndex,
         })
         .first();
     return !!hit;
 }
 
-async function recordPrint(orderId: string, row: LabelRow, copies: number) {
+async function recordPrint(orderId: string, row: LabelRow, copies: number, cycleIndex: number) {
     const db = await getDb();
     await db("label_print_log").insert({
         order_id: orderId,
@@ -778,6 +780,7 @@ async function recordPrint(orderId: string, row: LabelRow, copies: number) {
         package_type: row.packageType,
         toors_barcode: row.toorsBarcode,
         copies,
+        cycle_index: cycleIndex,
     });
 }
 
@@ -928,8 +931,8 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         for (const row of cycleRows) {
             if (row.labelType !== entry.type) continue;
 
-            // Duplicate guard – mirrors Databaze sheet check in VBA
-            if (await isAlreadyPrinted(order._id, row)) {
+            // Duplicate guard – mirrors Databaze sheet check in VBA, scoped to this cycle
+            if (await isAlreadyPrinted(order._id, row, cycleIndex)) {
                 console.log(`[LABELS] SKIP already printed: ${row.labelType} ${row.packagePart} ${row.packageType}`);
                 skipped++;
                 continue;
@@ -955,7 +958,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                     }
                 }
 
-                await recordPrint(order._id, row, copies);
+                await recordPrint(order._id, row, copies, cycleIndex);
                 printed++;
                 console.log(
                     `[LABELS] ${printerConfigured ? "Printed" : "Dry-run"} ${copies}x ` +
@@ -1110,9 +1113,7 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
  */
 async function printQrPng(pngPath: string, copies: number): Promise<void> {
     if (!QR_PRINTER) {
-        console.log(
-            `[QR] No printer configured — would print ${copies}x "${pngPath}"`,
-        );
+        console.log(`[QR] No printer configured — would print ${copies}x "${pngPath}"`);
         return;
     }
 
