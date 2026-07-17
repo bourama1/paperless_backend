@@ -1,8 +1,6 @@
 jest.mock("../../config/database");
 jest.mock("../../services/notificationService");
 
-// Wrap fs with jest mocks; readFileSync delegates to real fs by default
-// so country-codes.json loads correctly at module-import time.
 jest.mock("fs", () => {
     const actual = jest.requireActual("fs");
     return {
@@ -10,35 +8,21 @@ jest.mock("fs", () => {
         readFileSync: jest.fn((...args: any[]) =>
             (actual as any).readFileSync(...args),
         ),
-        writeFileSync: jest.fn(),
-        unlinkSync: jest.fn(),
         existsSync: jest.fn(() => true),
     };
 });
-
-jest.mock("pdf-lib", () => ({
-    PDFDocument: {
-        load: jest.fn(),
-    },
-    rgb: jest.fn(() => ({ r: 1, g: 0, b: 0 })),
-}));
 
 jest.mock("../../services/pdfaService", () => ({
     convertToPdfA: jest.fn(),
     PdfaConversionError: class PdfaConversionError extends Error {},
 }));
 
-import { reviseFile, exportPdfa } from "../../controllers/filesController";
+import { getRevisionsByDate, exportPdfa } from "../../controllers/filesController";
 import { getDb } from "../../config/database";
-import { notifyQueueUpdate } from "../../services/notificationService";
 import { Request, Response } from "express";
 import fs from "fs";
-import { PDFDocument } from "pdf-lib";
 import { convertToPdfA, PdfaConversionError } from "../../services/pdfaService";
-
-function thenable<T>(value: T) {
-    return { then: (resolve: (v: T) => void) => resolve(value) };
-}
+import { thenable } from "../helpers/thenable";
 
 describe("Files Controller", () => {
     let mockRequest: Partial<Request>;
@@ -50,136 +34,109 @@ describe("Files Controller", () => {
         mockJson = jest.fn();
         mockStatus = jest.fn().mockReturnValue({ json: mockJson });
         mockResponse = { json: mockJson, status: mockStatus };
-
-        const mockPdfDoc = {
-            getPages: jest.fn().mockReturnValue([
-                {
-                    getSize: jest
-                        .fn()
-                        .mockReturnValue({ width: 100, height: 100 }),
-                    drawLine: jest.fn(),
-                },
-            ]),
-            save: jest.fn().mockResolvedValue(Buffer.from("%PDF-1.4 mock")),
-        };
-
-        (PDFDocument.load as jest.Mock).mockResolvedValue(mockPdfDoc);
-        (fs.readFileSync as jest.Mock).mockReturnValue(
-            Buffer.from("%PDF-1.4 mock"),
-        );
-        (fs.writeFileSync as jest.Mock).mockImplementation(() => {});
-        (fs.unlinkSync as jest.Mock).mockImplementation(() => {});
     });
 
     afterEach(() => {
         jest.clearAllMocks();
     });
 
-    describe("reviseFile", () => {
-        it("should successfully revise a file and create a new revision", async () => {
-            mockRequest = {
-                params: { id: "1" },
-                body: { annotations: JSON.stringify([]) },
-                file: { path: "temp/path", filename: "new_file.pdf" } as any,
-            };
-            const mockDoc = { id: 1, name: "document.pdf" };
-            const mockLatestRevision = { version: 1, filename: "document.pdf" };
-            const mockUpdatedDoc = {
-                id: 1,
-                name: "document.pdf",
-                updated_at: "2026-04-15",
-            };
-            const mockRevisions = [
+    describe("getRevisionsByDate", () => {
+        function chainable(resolveValue: any) {
+            const chain: any = jest.fn();
+            chain.mockReturnValue(chain);
+            chain.join = jest.fn().mockReturnValue(chain);
+            chain.whereRaw = jest.fn().mockReturnValue(chain);
+            chain.where = jest.fn().mockReturnValue(chain);
+            chain.orderBy = jest.fn().mockReturnValue(chain);
+            chain.select = jest.fn().mockResolvedValue(resolveValue);
+            return chain;
+        }
+
+        it("should return revisions grouped by document for a given date", async () => {
+            mockRequest = { query: { date: "2026-07-17" } };
+            const mockRows = [
                 {
-                    id: 2,
                     document_id: 1,
-                    filename: "document_v2.pdf",
+                    document_name: "doc1.pdf",
+                    updated_at: "2026-07-17T10:00:00Z",
+                    id: 10,
+                    filename: "doc1_Rev2.pdf",
                     version: 2,
+                    annotations: null,
+                    created_at: "2026-07-17T10:30:00Z",
                 },
-                { id: 1, document_id: 1, filename: "document.pdf", version: 1 },
+                {
+                    document_id: 1,
+                    document_name: "doc1.pdf",
+                    updated_at: "2026-07-17T10:00:00Z",
+                    id: 11,
+                    filename: "doc1_Rev3.pdf",
+                    version: 3,
+                    annotations: '{"paths":[]}',
+                    created_at: "2026-07-17T11:00:00Z",
+                },
+                {
+                    document_id: 2,
+                    document_name: "doc2.pdf",
+                    updated_at: "2026-07-17T12:00:00Z",
+                    id: 12,
+                    filename: "doc2_Rev1.pdf",
+                    version: 1,
+                    annotations: null,
+                    created_at: "2026-07-17T12:30:00Z",
+                },
             ];
 
-            const db = Object.assign(jest.fn(), {
-                fn: { now: jest.fn(() => "CURRENT_TIMESTAMP") },
-            });
-
-            const docWhereFirst = {
-                where: () => ({ first: () => thenable(mockDoc) }),
-            };
-            const revWhereOrderFirst = {
-                select: () => ({
-                    where: () => ({
-                        orderBy: () => ({
-                            first: () => thenable(mockLatestRevision),
-                        }),
-                    }),
-                }),
-            };
-            const revInsert = { insert: () => thenable(undefined) };
-            const docUpdate = {
-                where: () => ({ update: () => thenable(undefined) }),
-            };
-            const docWhereFirstUpdated = {
-                where: () => ({ first: () => thenable(mockUpdatedDoc) }),
-            };
-            const revWhereOrder = {
-                where: () => ({ orderBy: () => thenable(mockRevisions) }),
-            };
-
-            db.mockReturnValueOnce(docWhereFirst)
-                .mockReturnValueOnce(revWhereOrderFirst)
-                .mockReturnValueOnce(revInsert)
-                .mockReturnValueOnce(docUpdate)
-                .mockReturnValueOnce(docWhereFirstUpdated)
-                .mockReturnValueOnce(revWhereOrder);
-
+            const db = chainable(mockRows);
             (getDb as jest.Mock).mockResolvedValue(db);
 
-            await reviseFile(mockRequest as Request, mockResponse as Response);
+            await getRevisionsByDate(mockRequest as Request, mockResponse as Response);
 
-            expect(fs.writeFileSync).toHaveBeenCalled();
-            expect(fs.unlinkSync).toHaveBeenCalledWith("temp/path");
-            expect(notifyQueueUpdate).toHaveBeenCalledWith({
-                ...mockUpdatedDoc,
-                revisions: mockRevisions,
-            });
             expect(mockJson).toHaveBeenCalledWith({
-                ...mockUpdatedDoc,
-                revisions: mockRevisions,
+                date: "2026-07-17",
+                items: [
+                    {
+                        document_id: 1,
+                        document_name: "doc1.pdf",
+                        updated_at: "2026-07-17T10:00:00Z",
+                        revisions: [
+                            { id: 10, filename: "doc1_Rev2.pdf", version: 2, created_at: "2026-07-17T10:30:00Z", has_annotations: false },
+                            { id: 11, filename: "doc1_Rev3.pdf", version: 3, created_at: "2026-07-17T11:00:00Z", has_annotations: true },
+                        ],
+                    },
+                    {
+                        document_id: 2,
+                        document_name: "doc2.pdf",
+                        updated_at: "2026-07-17T12:00:00Z",
+                        revisions: [
+                            { id: 12, filename: "doc2_Rev1.pdf", version: 1, created_at: "2026-07-17T12:30:00Z", has_annotations: false },
+                        ],
+                    },
+                ],
             });
         });
 
-        it("should return 400 if no file is uploaded", async () => {
-            mockRequest = { params: { id: "1" }, body: {} };
+        it("should default to today when no date is provided", async () => {
+            mockRequest = { query: {} };
 
-            await reviseFile(mockRequest as Request, mockResponse as Response);
-
-            expect(mockStatus).toHaveBeenCalledWith(400);
-            expect(mockJson).toHaveBeenCalledWith({
-                error: "No file uploaded",
-            });
-        });
-
-        it("should return 404 if document not found", async () => {
-            mockRequest = {
-                params: { id: "1" },
-                body: {},
-                file: { path: "temp/path" } as any,
-            };
-            const db = Object.assign(jest.fn(), {
-                fn: { now: jest.fn() },
-            });
-            db.mockReturnValue({
-                where: () => ({ first: () => thenable(null) }),
-            });
+            const db = chainable([]);
             (getDb as jest.Mock).mockResolvedValue(db);
 
-            await reviseFile(mockRequest as Request, mockResponse as Response);
+            await getRevisionsByDate(mockRequest as Request, mockResponse as Response);
 
-            expect(mockStatus).toHaveBeenCalledWith(404);
-            expect(mockJson).toHaveBeenCalledWith({
-                error: "Document not found",
-            });
+            const today = new Date().toISOString().slice(0, 10);
+            expect(mockJson).toHaveBeenCalledWith({ date: today, items: [] });
+        });
+
+        it("should return empty items when no revisions match", async () => {
+            mockRequest = { query: { date: "2020-01-01" } };
+
+            const db = chainable([]);
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getRevisionsByDate(mockRequest as Request, mockResponse as Response);
+
+            expect(mockJson).toHaveBeenCalledWith({ date: "2020-01-01", items: [] });
         });
     });
 

@@ -12,9 +12,7 @@
         "format:check": "prettier --check \"src/**/*.ts\"",
         "test": "jest --forceExit",
         "prepare": "husky",
-        "test:preview": "ts-node scripts/test-label-preview.ts",
-        "test:compare": "powershell -ExecutionPolicy Bypass -File scripts/Compare-VbaAndBackend.ps1",
-        "test:generate": "ts-node scripts/generate-full-prn.ts"
+        "test:compare": "powershell -ExecutionPolicy Bypass -File scripts/Compare-VbaAndBackend.ps1"
     },
     "keywords": [],
     "author": "",
@@ -27,12 +25,8 @@
         "express": "^5.2.1",
         "knex": "^3.2.10",
         "morgan": "^1.10.1",
-        "multer": "^2.1.1",
-        "pdf-lib": "^1.17.1",
         "pg": "^8.22.0",
-        "socket.io": "^4.8.3",
-        "sqlite": "^5.1.1",
-        "sqlite3": "^6.0.1"
+        "socket.io": "^4.8.3"
     },
     "devDependencies": {
         "@eslint/js": "^10.0.1",
@@ -40,7 +34,6 @@
         "@types/express": "^5.0.6",
         "@types/jest": "^30.0.0",
         "@types/morgan": "^1.9.10",
-        "@types/multer": "^2.1.0",
         "@types/node": "^25.6.0",
         "@types/supertest": "^7.2.0",
         "@typescript-eslint/eslint-plugin": "^8.58.2",
@@ -50,15 +43,13 @@
         "globals": "^17.5.0",
         "husky": "^9.1.7",
         "jest": "^30.3.0",
-        "jiti": "^2.6.1",
         "lint-staged": "^17.0.8",
         "nodemon": "^3.1.14",
         "prettier": "^3.8.4",
         "supertest": "^7.2.2",
         "ts-jest": "^29.4.9",
         "ts-node": "^10.9.2",
-        "typescript": "^6.0.2",
-        "typescript-eslint": "^8.58.2"
+        "typescript": "^6.0.2"
     },
     "lint-staged": {
         "src/**/*.ts": [
