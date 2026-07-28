@@ -9,3 +9,4 @@ eslint.config.*.map
 test-fixtures/output/
 deploy/
 publish/
+gs/
