@@ -2,6 +2,11 @@ import axios from "axios";
 import { getDb } from "../config/database";
 import { handleLabelPrinting } from "./labelPrintingService";
 import { DOCUMENT_TYPES } from "../config/documentTypes";
+import {
+    DOCUMENTS_PRINTER_HOST,
+    DOCUMENTS_PRINTER_PORT,
+    printPdfFile,
+} from "./documentPrinterService";
 
 const WORKSTATIONS_API_URL =
     process.env.WORKSTATIONS_API_URL ||
@@ -349,6 +354,16 @@ export const searchPbom = async (
     return results;
 };
 
+// ── standard document printing (PBOM, declarations, confirmations) ─────────
+//
+// Prints to DOCUMENTS_PRINTER_HOST via documentPrinterService (Ghostscript
+// render → raw TCP to the printer's JetDirect/raw port). QR stickers use
+// the exact same pipeline and the same printer — see
+// labelPrintingService.ts's handleQrSticker/printQrPng.
+//
+// NOTE: Godex label printing is unrelated and keeps its own UNC print-share
+// config (LABEL_PRINTER_UNC_PATH) in labelPrintingService.ts.
+
 async function triggerPrinting(
     filePaths: string[],
     order: OrderUpdate["order"],
@@ -360,11 +375,9 @@ async function triggerPrinting(
         return;
     }
 
-    const printerName = process.env.DOCUMENTS_PRINTER_NAME || "";
-
-    if (!printerName) {
+    if (!DOCUMENTS_PRINTER_HOST) {
         console.log(
-            `[PRINT] No printer configured — would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
+            `[PRINT] No printer configured (DOCUMENTS_PRINTER_HOST empty) — would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
         );
         for (const fp of filePaths) {
             console.log(`  - ${fp}`);
@@ -373,20 +386,15 @@ async function triggerPrinting(
     }
 
     console.log(
-        `[PRINT] Printing ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}) to "${printerName}":`,
+        `[PRINT] Printing ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}) to ${DOCUMENTS_PRINTER_HOST}:${DOCUMENTS_PRINTER_PORT}:`,
     );
 
-    const { execFile } = await import("child_process");
-    const { promisify } = await import("util");
-    const execFileAsync = promisify(execFile);
-
     for (const fp of filePaths) {
-        const psCommand = `Start-Process -FilePath "${fp}" -Verb Print -WindowStyle Hidden`;
-        console.log(`  - ${fp}`);
-        await execFileAsync("powershell.exe", [
-            "-NoProfile",
-            "-Command",
-            psCommand,
-        ]);
+        try {
+            await printPdfFile(fp);
+            console.log(`  - printed ${fp}`);
+        } catch (err: any) {
+            console.error(`[PRINT] Failed to print ${fp}: ${err.message}`);
+        }
     }
 }

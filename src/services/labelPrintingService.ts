@@ -31,6 +31,10 @@ import path from "path";
 import net from "net";
 import { getDb } from "../config/database";
 import { OrderUpdate } from "./workstationService";
+import {
+    DOCUMENTS_PRINTER_HOST,
+    printPngFile,
+} from "./documentPrinterService";
 
 // EU countries that use the 47-line simplified label (from parametry AM:AN)
 const EU_COUNTRIES = new Set([
@@ -1068,20 +1072,23 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 //   - characteristic 6210610 → rail type (e.g. "GSL", "VL", "SL")
 //   - "Objednáno" row → PocetVrat (number of doors to print)
 //   - "Cenová skupina" → if "C01" skip entirely
-// Maps rail type → QR PNG filename, prints PocetVrat copies via lp.
+// Maps rail type → QR PNG filename, prints PocetVrat copies.
+//
+// Printed on the SAME printer as documents (DOCUMENTS_PRINTER_HOST) via
+// documentPrinterService — the PNG is wrapped into a one-page PDF and sent
+// through the identical Ghostscript → raw-TCP pipeline. There is no
+// separate QR printer env var anymore.
 //
 // Environment variables:
 //   LABEL_TMP_FILES_PATH   path to the TMP*.TXT files
 //                          default: //TOCZ-FS2/510-TOCZ/300 Departments/300 Technical Services/Dokumentace B/NACTENO
 //   LABEL_QR_IMAGES_PATH   path to the folder containing QR PNG files
-//   LABEL_QR_PRINTER       printer name for lp command (default: default printer)
 
 const TMP_FILES_PATH =
     process.env.LABEL_TMP_FILES_PATH ||
     "\\\\TOCZ-FS2\\510-TOCZ\\300 Departments\\300 Technical Services\\Dokumentace B\\NACTENO";
 
 const QR_IMAGES_PATH = process.env.LABEL_QR_IMAGES_PATH || "";
-const QR_PRINTER = process.env.LABEL_QR_PRINTER || "";
 
 // Rail type → QR PNG filename (mirrors the VBA Select Case TypVedeni block)
 const QR_CODE_MAP: Record<string, string> = {
@@ -1183,69 +1190,23 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
 }
 
 /**
- * Prints a QR PNG file N times on Windows.
- *
- * QR_PRINTER can be:
- *   - IP address    → sends PNG raw via TCP (port 9100)
- *   - printer name  → uses mspaint /pt
- *   - empty         → PowerShell Start-Process -Verb Print (default printer)
+ * Prints a QR PNG file N times, using the same printer and pipeline as
+ * document printing (documentPrinterService: PNG → one-page PDF →
+ * Ghostscript → raw TCP to DOCUMENTS_PRINTER_HOST).
  *
  * Equivalent to VBA: wordDoc.PrintOut repeated PocetVrat times.
  */
 async function printQrPng(pngPath: string, copies: number): Promise<void> {
-    if (!QR_PRINTER) {
+    if (!DOCUMENTS_PRINTER_HOST) {
         console.log(
-            `[QR] No printer configured — would print ${copies}x "${pngPath}"`,
+            `[QR] No printer configured (DOCUMENTS_PRINTER_HOST empty) — would print ${copies}x "${pngPath}"`,
         );
         return;
     }
-
-    const { execFile } = await import("child_process");
-    const { promisify } = await import("util");
-    const execFileAsync = promisify(execFile);
-
-    for (let i = 0; i < copies; i++) {
-        const pngBuf = fs.readFileSync(pngPath);
-
-        if (QR_PRINTER && QR_PRINTER.includes(".")) {
-            // RAW TCP to IP (port 9100)
-            await new Promise<void>((resolve, reject) => {
-                const socket = new net.Socket();
-                socket.connect(9100, QR_PRINTER, () => {
-                    socket.write(pngBuf, (err) => {
-                        if (err) {
-                            socket.destroy();
-                            reject(err);
-                        } else {
-                            socket.end();
-                            resolve();
-                        }
-                    });
-                });
-                socket.on("error", reject);
-                socket.setTimeout(10000, () => {
-                    socket.destroy();
-                    reject(new Error("QR printer timed out"));
-                });
-            });
-            console.log(
-                `[QR] Sent via TCP ${QR_PRINTER}:9100 (copy ${i + 1}/${copies})`,
-            );
-        } else {
-            let psCommand: string;
-            if (QR_PRINTER) {
-                psCommand = `Start-Process -FilePath "mspaint.exe" -ArgumentList '/pt "${pngPath}" "${QR_PRINTER}"' -WindowStyle Hidden -Wait`;
-            } else {
-                psCommand = `Start-Process -FilePath "${pngPath}" -Verb Print -WindowStyle Hidden`;
-            }
-            console.log(`[QR] ${psCommand} (copy ${i + 1}/${copies})`);
-            await execFileAsync("powershell.exe", [
-                "-NoProfile",
-                "-Command",
-                psCommand,
-            ]);
-        }
-    }
+    console.log(
+        `[QR] Printing ${copies}x "${pngPath}" to ${DOCUMENTS_PRINTER_HOST}`,
+    );
+    await printPngFile(pngPath, copies);
 }
 
 /**

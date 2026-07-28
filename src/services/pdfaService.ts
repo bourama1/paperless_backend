@@ -23,7 +23,10 @@ const execFileAsync = promisify(execFile);
  * as the OutputIntent.
  */
 
-const GHOSTSCRIPT_BIN = process.env.GHOSTSCRIPT_PATH || "gs";
+// Exported so other services (e.g. workstationService's raw-IP document
+// printing) can reuse the same configured Ghostscript binary instead of
+// re-reading the env var themselves.
+export const GHOSTSCRIPT_BIN = process.env.GHOSTSCRIPT_PATH || "gs";
 
 const ICC_PROFILE_PATH = path.join(
     __dirname,
