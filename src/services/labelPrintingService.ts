@@ -107,6 +107,7 @@ function normalizeWorkplace(name: string): string {
 const WORKPLACE_TO_SCAN_PREFIX: Record<string, string> = {
     hardware: SCAN_PREFIX.HARDWARE,
     predmontazoptolisty: SCAN_PREFIX.HARDWARE,
+    motor: SCAN_PREFIX.HARDWARE, // "Motor" workplace uses the hardware/motor scan prefix
 
     predpripravahridele: SCAN_PREFIX.KRIDLO, // full Czech name
     predhridel: SCAN_PREFIX.KRIDLO, // "PredHridel" as logged by production

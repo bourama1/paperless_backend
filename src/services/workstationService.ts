@@ -1,4 +1,8 @@
 import axios from "axios";
+import fs from "fs";
+import path from "path";
+import os from "os";
+import crypto from "crypto";
 import { getDb } from "../config/database";
 import { handleLabelPrinting } from "./labelPrintingService";
 import { DOCUMENT_TYPES } from "../config/documentTypes";
@@ -175,14 +179,25 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
     }
 };
 
+/**
+ * Resolves which order identifier to query doc_manager with. Prefers
+ * projectNumber, falling back to salesOrder, then productOrder, since not
+ * every order payload carries all three.
+ */
+function resolveOrderCode(order: OrderUpdate["order"]): string {
+    return order.projectNumber || order.salesOrder || order.productOrder || "";
+}
+
 async function printDocumentsForOrder(order: OrderUpdate["order"]) {
     console.log(
         `Order ${order._id} (${order.productOrder}) at ${order.workplace}. Fetching documents...`,
     );
 
-    if (!order.projectNumber || !order.position) {
+    const orderCode = resolveOrderCode(order);
+
+    if (!orderCode || !order.position) {
         console.log(
-            `[DOCS] projectNumber or position empty — skipping document fetch for order ${order.productOrder}`,
+            `[DOCS] No projectNumber/salesOrder/productOrder or position — skipping document fetch for order ${order.productOrder}`,
         );
         return;
     }
@@ -197,7 +212,7 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
             .filter((n) => !isNaN(n));
 
         for (const typeId of typeIds) {
-            const docs = await fetchDocumentsByType(order, typeId);
+            const docs = await fetchDocumentsByType(order, orderCode, typeId);
             docsToPrint.push(...docs);
             console.log(`Found ${docs.length} documents of type ${typeId}`);
         }
@@ -210,26 +225,43 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
 
 async function fetchDocumentsByType(
     order: OrderUpdate["order"],
+    orderCode: string,
     documentType: number,
 ): Promise<string[]> {
+    const url = `${DOC_MANAGER_URL}/api/documents/fetch`;
+
     try {
-        const url = `${DOC_MANAGER_URL}/api/documents/fetch`;
-        const response = await axios.get<{ file_path: string }[]>(url, {
+        const response = await axios.get(url, {
             params: {
-                order_code: order.projectNumber,
+                order_code: orderCode,
                 position_code: order.position,
                 document_type: documentType,
             },
+            responseType: "arraybuffer",
             timeout: 10000,
+            validateStatus: (status) => status === 200 || status === 404,
         });
 
-        if (Array.isArray(response.data)) {
-            return response.data.map((d) => d.file_path);
+        if (response.status === 404) {
+            return []; // no document of this type for this order/position
         }
-        return [];
+
+        const cd = response.headers["content-disposition"] || "";
+        const fileNameMatch = cd.match(/filename="?(.+?)"?$/);
+        const fileName = fileNameMatch
+            ? fileNameMatch[1]!.trim()
+            : `${orderCode}_${order.position}_${documentType}.pdf`;
+
+        const tmpPath = path.join(
+            os.tmpdir(),
+            `docprint-${crypto.randomBytes(6).toString("hex")}-${fileName}`,
+        );
+        fs.writeFileSync(tmpPath, Buffer.from(response.data));
+
+        return [tmpPath];
     } catch (error) {
         console.error(
-            `Error fetching documents type ${documentType} for order ${order.projectNumber}/${order.position}:`,
+            `Error fetching documents type ${documentType} for order ${orderCode}/${order.position}:`,
             error,
         );
         return [];
@@ -375,6 +407,14 @@ async function triggerPrinting(
         return;
     }
 
+    // filePaths are temp files downloaded by fetchDocumentsByType — always
+    // clean them up once we're done with them, print or dry-run either way.
+    const cleanup = () => {
+        for (const fp of filePaths) {
+            fs.unlink(fp, () => {});
+        }
+    };
+
     if (!DOCUMENTS_PRINTER_HOST) {
         console.log(
             `[PRINT] No printer configured (DOCUMENTS_PRINTER_HOST empty) — would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
@@ -382,6 +422,7 @@ async function triggerPrinting(
         for (const fp of filePaths) {
             console.log(`  - ${fp}`);
         }
+        cleanup();
         return;
     }
 
@@ -397,4 +438,5 @@ async function triggerPrinting(
             console.error(`[PRINT] Failed to print ${fp}: ${err.message}`);
         }
     }
+    cleanup();
 }
