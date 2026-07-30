@@ -123,6 +123,16 @@ describe("Workstation Service", () => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
+                if (table === "document_print_log") {
+                    return {
+                        where: () => ({ first: () => thenable(null) }),
+                        insert: () => ({
+                            onConflict: () => ({
+                                ignore: () => thenable(undefined),
+                            }),
+                        }),
+                    };
+                }
                 return {};
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -139,6 +149,16 @@ describe("Workstation Service", () => {
             db.mockImplementation((table: string) => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
+                }
+                if (table === "document_print_log") {
+                    return {
+                        where: () => ({ first: () => thenable(null) }),
+                        insert: () => ({
+                            onConflict: () => ({
+                                ignore: () => thenable(undefined),
+                            }),
+                        }),
+                    };
                 }
                 return {};
             });
@@ -318,16 +338,34 @@ describe("Workstation Service", () => {
 
     describe("searchPbom", () => {
         it("should return matching results", async () => {
-            (axios.get as jest.Mock)
-                .mockResolvedValueOnce({ data: ["12345", "67890"] })
-                .mockResolvedValueOnce({ data: ["01", "02"] })
-                .mockResolvedValueOnce({ data: [{ file_path: "doc.pdf" }] })
-                .mockResolvedValueOnce({ data: [{ file_path: "doc2.pdf" }] });
+            (axios.get as jest.Mock).mockImplementation(
+                (url: string, config: any) => {
+                    if (url.includes("/orders")) {
+                        return Promise.resolve({ data: ["12345", "67890"] });
+                    }
+                    if (url.includes("/positions")) {
+                        return Promise.resolve({ data: ["01", "02"] });
+                    }
+                    if (url.includes("/api/documents/fetch")) {
+                        // Only position "01" has a BOM (Hardware) — "02" has none.
+                        const { position_code, document_type } =
+                            config.params;
+                        const hasDoc =
+                            position_code === "01" && document_type === 14;
+                        return Promise.resolve({
+                            status: hasDoc ? 200 : 404,
+                            data: { destroy: jest.fn() },
+                        });
+                    }
+                    return Promise.resolve({ data: [] });
+                },
+            );
 
             const results = await searchPbom("12345");
 
             expect(results.length).toBeGreaterThan(0);
             expect(results[0]).toHaveProperty("order_code", 12345);
+            expect(results[0]).toHaveProperty("position_code", 1);
         });
 
         it("should return empty array when no matching order found", async () => {

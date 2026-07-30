@@ -5,6 +5,7 @@ import {
     OrderUpdate,
     importDocument,
     searchPbom,
+    listAvailablePbomTypes,
 } from "../services/workstationService";
 import path from "path";
 import fs from "fs";
@@ -124,6 +125,7 @@ export const importPbom = async (req: Request, res: Response) => {
         customer,
         productOrder,
         productDesc,
+        workplace,
         documentType,
     } = req.body;
 
@@ -140,6 +142,7 @@ export const importPbom = async (req: Request, res: Response) => {
             customer,
             productOrder,
             productDesc,
+            workplace,
             documentType,
         });
         res.json(doc);
@@ -150,6 +153,27 @@ export const importPbom = async (req: Request, res: Response) => {
             error.message ||
             "Internal server error";
         res.status(500).json({ error: message });
+    }
+};
+
+export const listPbomTypesHandler = async (req: Request, res: Response) => {
+    const { order_code, position_code } = req.query;
+
+    if (!order_code || !position_code) {
+        return res.status(400).json({
+            error: "order_code and position_code query parameters are required",
+        });
+    }
+
+    try {
+        const types = await listAvailablePbomTypes(
+            String(order_code),
+            String(position_code),
+        );
+        res.json(types);
+    } catch (error) {
+        console.error("Error listing PBOM types:", error);
+        res.status(500).json({ error: "Internal server error" });
     }
 };
 

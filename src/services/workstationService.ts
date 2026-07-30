@@ -4,8 +4,13 @@ import path from "path";
 import os from "os";
 import crypto from "crypto";
 import { getDb } from "../config/database";
-import { handleLabelPrinting } from "./labelPrintingService";
-import { DOCUMENT_TYPES } from "../config/documentTypes";
+import { handleLabelPrinting, normalizeWorkplace } from "./labelPrintingService";
+import {
+    DOCUMENT_TYPES,
+    BOM_DOCUMENT_TYPES,
+    documentTypeName,
+    resolvePbomTypeForWorkplace,
+} from "../config/documentTypes";
 import {
     DOCUMENTS_PRINTER_HOST,
     DOCUMENTS_PRINTER_PORT,
@@ -188,7 +193,43 @@ function resolveOrderCode(order: OrderUpdate["order"]): string {
     return order.projectNumber || order.salesOrder || order.productOrder || "";
 }
 
+/** Document printing (PBOM/declarations/confirmation) only applies to Hardware. */
+function isDocumentPrintWorkplace(workplace: string): boolean {
+    return normalizeWorkplace(workplace || "") === "hardware";
+}
+
+/** Has this projectNumber/position combo already had its documents printed? */
+async function hasAlreadyPrintedDocuments(
+    orderCode: string,
+    position: string,
+): Promise<boolean> {
+    const db = await getDb();
+    const hit = await db("document_print_log")
+        .where({ project_number: orderCode, position })
+        .first();
+    return !!hit;
+}
+
+async function recordDocumentPrint(
+    orderCode: string,
+    position: string,
+    orderId: string,
+) {
+    const db = await getDb();
+    await db("document_print_log")
+        .insert({ project_number: orderCode, position, order_id: orderId })
+        .onConflict(["project_number", "position"])
+        .ignore();
+}
+
 async function printDocumentsForOrder(order: OrderUpdate["order"]) {
+    if (!isDocumentPrintWorkplace(order.workplace)) {
+        console.log(
+            `[DOCS] workplace="${order.workplace}" is not Hardware — skipping document print for order ${order.productOrder}`,
+        );
+        return;
+    }
+
     console.log(
         `Order ${order._id} (${order.productOrder}) at ${order.workplace}. Fetching documents...`,
     );
@@ -198,6 +239,13 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
     if (!orderCode || !order.position) {
         console.log(
             `[DOCS] No projectNumber/salesOrder/productOrder or position — skipping document fetch for order ${order.productOrder}`,
+        );
+        return;
+    }
+
+    if (await hasAlreadyPrintedDocuments(orderCode, order.position)) {
+        console.log(
+            `[DOCS] Already printed documents for ${orderCode}/${order.position} — skipping (order ${order.productOrder})`,
         );
         return;
     }
@@ -217,7 +265,15 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
             console.log(`Found ${docs.length} documents of type ${typeId}`);
         }
 
+        if (docsToPrint.length === 0) {
+            // Nothing found yet (documents may not be generated at this
+            // point in the order lifecycle) — don't record a "printed"
+            // marker, so a later cycle can still pick this up and try again.
+            return;
+        }
+
         await triggerPrinting(docsToPrint, order);
+        await recordDocumentPrint(orderCode, order.position, order._id);
     } catch (error) {
         console.error("Error in printDocumentsForOrder:", error);
     }
@@ -274,6 +330,7 @@ export interface PbomImportRequest {
     customer: string;
     productOrder?: string;
     productDesc?: string;
+    workplace?: string; // used to pick the right BOM type when documentType isn't given explicitly
     documentType?: number;
 }
 
@@ -284,7 +341,12 @@ export interface PbomSearchResult {
 }
 
 export const importDocument = async (req: PbomImportRequest) => {
-    const docType = req.documentType || DOCUMENT_TYPES.PBOM_HARDWARE;
+    // Explicit documentType wins (e.g. the search screen letting someone
+    // pick a specific BOM). Otherwise resolve from workplace — "Motor"
+    // opens the Motor BOM, "Hardware" the Hardware BOM, etc. Falls back to
+    // PBOM_HARDWARE if workplace is missing/unrecognized.
+    const docType =
+        req.documentType || resolvePbomTypeForWorkplace(req.workplace || "");
 
     const fetchUrl = `${DOC_MANAGER_URL}/api/documents/fetch`;
 
@@ -359,24 +421,27 @@ export const searchPbom = async (
 
         for (const pos of positions) {
             try {
-                await axios.get(`${DOC_MANAGER_URL}/api/documents/fetch`, {
-                    params: {
-                        order_code: matchingOrder,
-                        position_code: pos,
-                        document_type: DOCUMENT_TYPES.PBOM_HARDWARE,
-                    },
-                    timeout: 5000,
-                });
-                results.push({
-                    customer_code: CUSTOMER_PRODUCTION,
-                    order_code:
-                        typeof matchingOrder === "number"
-                            ? matchingOrder
-                            : Number(matchingOrder),
-                    position_code: typeof pos === "number" ? pos : Number(pos),
-                });
+                // A position belongs in search results if it has ANY BOM
+                // type available — not just Hardware specifically, or a
+                // position whose only BOM is e.g. Motor would silently
+                // never show up in search.
+                const types = await listAvailablePbomTypes(
+                    String(matchingOrder),
+                    String(pos),
+                );
+                if (types.length > 0) {
+                    results.push({
+                        customer_code: CUSTOMER_PRODUCTION,
+                        order_code:
+                            typeof matchingOrder === "number"
+                                ? matchingOrder
+                                : Number(matchingOrder),
+                        position_code:
+                            typeof pos === "number" ? pos : Number(pos),
+                    });
+                }
             } catch {
-                // no PBOM doc for this position
+                // no BOM doc for this position
             }
         }
     } catch (error) {
@@ -384,6 +449,65 @@ export const searchPbom = async (
     }
 
     return results;
+};
+
+export interface PbomTypeOption {
+    document_type: number;
+    name: string;
+}
+
+/**
+ * Lists which BOM document types actually exist for a given order/position,
+ * by probing doc_manager for each candidate type (HEAD-style: we only read
+ * headers/status, never the file body, so this stays cheap even though
+ * it's one request per candidate type). Used by the search screen so
+ * someone can pick any BOM that's actually there, instead of assuming
+ * Hardware.
+ */
+export const listAvailablePbomTypes = async (
+    orderCode: string,
+    position: string,
+): Promise<PbomTypeOption[]> => {
+    const fetchUrl = `${DOC_MANAGER_URL}/api/documents/fetch`;
+    const available: PbomTypeOption[] = [];
+
+    await Promise.all(
+        BOM_DOCUMENT_TYPES.map(async (documentType) => {
+            try {
+                const res = await axios.get(fetchUrl, {
+                    params: {
+                        order_code: orderCode,
+                        position_code: position,
+                        document_type: documentType,
+                    },
+                    responseType: "stream",
+                    timeout: 8000,
+                    validateStatus: (status) => status === 200 || status === 404,
+                });
+                if (res.status === 200) {
+                    res.data.destroy(); // we only need to know it exists, not its content
+                    available.push({
+                        document_type: documentType,
+                        name: documentTypeName(documentType),
+                    });
+                } else {
+                    res.data.destroy();
+                }
+            } catch {
+                // connection issue / timeout — treat as "not available"
+            }
+        }),
+    );
+
+    // Stable, predictable order matching BOM_DOCUMENT_TYPES rather than
+    // whatever order the parallel requests happened to resolve in.
+    available.sort(
+        (a, b) =>
+            BOM_DOCUMENT_TYPES.indexOf(a.document_type) -
+            BOM_DOCUMENT_TYPES.indexOf(b.document_type),
+    );
+
+    return available;
 };
 
 // ── standard document printing (PBOM, declarations, confirmations) ─────────

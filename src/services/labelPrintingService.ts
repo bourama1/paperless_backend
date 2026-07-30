@@ -96,7 +96,7 @@ const SCAN_PREFIX = {
     VEDENI: 'K"žSVV ', // rail / track
 } as const;
 
-function normalizeWorkplace(name: string): string {
+export function normalizeWorkplace(name: string): string {
     return name
         .normalize("NFD")
         .replace(/[\u0300-\u036f]/g, "") // strip diacritics

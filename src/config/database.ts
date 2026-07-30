@@ -172,4 +172,19 @@ const setupDatabase = async (targetDb: Knex) => {
             table.timestamp("created_at").defaultTo(targetDb.fn.now());
         });
     }
+
+    // 10. document_print_log table — tracks projectNumber/position combos
+    // whose documents (PBOM, declarations, confirmations) have already been
+    // printed, so printDocumentsForOrder only prints once per combo instead
+    // of on every STARTED cycle. See workstationService.ts.
+    if (!(await targetDb.schema.hasTable("document_print_log"))) {
+        await targetDb.schema.createTable("document_print_log", (table) => {
+            table.increments("id").primary();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.string("order_id");
+            table.timestamp("printed_at").defaultTo(targetDb.fn.now());
+            table.unique(["project_number", "position"]);
+        });
+    }
 };
