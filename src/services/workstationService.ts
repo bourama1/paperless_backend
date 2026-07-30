@@ -317,7 +317,10 @@ async function fetchDocumentsByType(
         return [tmpPath];
     } catch (error) {
         console.error(
-            `Error fetching documents type ${documentType} for order ${orderCode}/${order.position}:`,
+            "Error fetching documents type %d for order %s/%s:",
+            documentType,
+            orderCode,
+            order.position,
             error,
         );
         return [];
