@@ -132,6 +132,17 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
             total_cycles: update.totalCycles,
         });
 
+        // Keep the workstations table's cycle_index/total_cycles current so
+        // GET /workstations can show live cycle progress (e.g. "2/6")
+        // instead of just quantity. These columns already existed in the
+        // schema but were never actually written — the external
+        // WORKSTATIONS_API_URL poll doesn't carry cycle info, only these
+        // order-update webhook calls do.
+        await db("workstations").where({ name: update.order.workplace }).update({
+            cycle_index: update.cycleIndex,
+            total_cycles: update.totalCycles,
+        });
+
         if (update.action === "FINISHED") {
             await db("workstations")
                 .where({ name: update.order.workplace })
@@ -317,10 +328,7 @@ async function fetchDocumentsByType(
         return [tmpPath];
     } catch (error) {
         console.error(
-            "Error fetching documents type %d for order %s/%s:",
-            documentType,
-            orderCode,
-            order.position,
+            `Error fetching documents type ${documentType} for order ${orderCode}/${order.position}:`,
             error,
         );
         return [];

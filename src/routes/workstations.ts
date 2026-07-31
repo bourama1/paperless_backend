@@ -9,6 +9,7 @@ import {
     saveEdited,
     renderDocument,
 } from "../controllers/workstationController";
+import { createOrderCompletion } from "../controllers/completionController";
 
 const router = Router();
 
@@ -18,6 +19,7 @@ router.get("/log", getWorkstationLog);
 router.post("/import-pbom", importPbom);
 router.get("/search-pbom", searchPbomHandler);
 router.get("/pbom-types", listPbomTypesHandler);
+router.post("/order-completion", createOrderCompletion);
 router.post("/save-edited", saveEdited);
 router.get("/documents/:id/render", renderDocument);
 

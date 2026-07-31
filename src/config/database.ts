@@ -187,4 +187,35 @@ const setupDatabase = async (targetDb: Knex) => {
             table.unique(["project_number", "position"]);
         });
     }
+
+    // 11. employees table — names shown in the kiosk tablet's "who finished
+    // this order" dropdown. See completionService.ts.
+    if (!(await targetDb.schema.hasTable("employees"))) {
+        await targetDb.schema.createTable("employees", (table) => {
+            table.increments("id").primary();
+            table.string("name").notNullable().unique();
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
+
+    // 12. order_completion_log table — one row per FINISHED cycle a kiosk
+    // tablet operator confirmed: who finished it, and whether the order is
+    // complete, missing a product (waiting), or being shipped incomplete.
+    // See completionService.ts.
+    if (!(await targetDb.schema.hasTable("order_completion_log"))) {
+        await targetDb.schema.createTable("order_completion_log", (table) => {
+            table.increments("id").primary();
+            table.string("order_id").notNullable();
+            table.string("workstation").notNullable();
+            table.integer("cycle_index");
+            table.integer("total_cycles");
+            table.string("product_order");
+            table.string("project_number");
+            table.string("position");
+            table.string("sales_order");
+            table.string("employee_name").notNullable();
+            table.string("status").notNullable(); // complete | missing_product | shipped_incomplete
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
 };

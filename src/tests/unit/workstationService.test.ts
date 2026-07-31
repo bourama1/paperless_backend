@@ -130,6 +130,11 @@ describe("Workstation Service", () => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
+                if (table === "workstations") {
+                    return {
+                        where: () => ({ update: () => thenable(undefined) }),
+                    };
+                }
                 if (table === "document_print_log") {
                     return {
                         where: () => ({ first: () => thenable(null) }),
@@ -156,6 +161,11 @@ describe("Workstation Service", () => {
             db.mockImplementation((table: string) => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
+                }
+                if (table === "workstations") {
+                    return {
+                        where: () => ({ update: () => thenable(undefined) }),
+                    };
                 }
                 if (table === "document_print_log") {
                     return {

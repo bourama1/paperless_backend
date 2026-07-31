@@ -12,6 +12,7 @@ import { getDb } from "./config/database";
 import queueRoutes from "./routes/queue";
 import filesRoutes from "./routes/files";
 import workstationRoutes from "./routes/workstations";
+import employeesRoutes from "./routes/employees";
 
 // Load environment variables
 dotenv.config();
@@ -79,6 +80,7 @@ app.use("/files", express.static(STORAGE_PATH));
 app.use("/queue", queueRoutes);
 app.use("/files", filesRoutes);
 app.use("/workstations", workstationRoutes);
+app.use("/employees", employeesRoutes);
 app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
