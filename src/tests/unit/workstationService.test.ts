@@ -1,6 +1,13 @@
 jest.mock("../../config/database");
 jest.mock("../../services/labelPrintingService", () => ({
     handleLabelPrinting: jest.fn().mockResolvedValue(undefined),
+    normalizeWorkplace: jest.fn((name: string) =>
+        (name || "")
+            .normalize("NFD")
+            .replace(/[\u0300-\u036f]/g, "")
+            .replace(/[^a-zA-Z0-9]/g, "")
+            .toLowerCase(),
+    ),
 }));
 jest.mock("../../index", () => ({
     io: { emit: jest.fn() },
@@ -340,11 +347,11 @@ describe("Workstation Service", () => {
         it("should return matching results", async () => {
             (axios.get as jest.Mock).mockImplementation(
                 (url: string, config: any) => {
-                    if (url.includes("/orders")) {
-                        return Promise.resolve({ data: ["12345", "67890"] });
-                    }
                     if (url.includes("/positions")) {
                         return Promise.resolve({ data: ["01", "02"] });
+                    }
+                    if (url.includes("/orders")) {
+                        return Promise.resolve({ data: ["12345", "67890"] });
                     }
                     if (url.includes("/api/documents/fetch")) {
                         // Only position "01" has a BOM (Hardware) — "02" has none.
