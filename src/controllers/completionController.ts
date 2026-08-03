@@ -3,8 +3,10 @@ import {
     listEmployees,
     addEmployee,
     recordOrderCompletion,
+    recordOrderPreparation,
     isValidCompletionStatus,
 } from "../services/completionService";
+import { buildPrepLabelPdf } from "../services/documentPrinterService";
 
 export const getEmployees = async (req: Request, res: Response) => {
     try {
@@ -72,5 +74,36 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
     } catch (error) {
         console.error("Error recording order completion:", error);
         res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const createPrepLabel = async (req: Request, res: Response) => {
+    const { projectNumber, position, employeeName } = req.body;
+
+    if (!projectNumber || !position || !employeeName) {
+        return res.status(400).json({
+            error: "projectNumber, position, and employeeName are required",
+        });
+    }
+
+    try {
+        const pdfBuffer = buildPrepLabelPdf(
+            projectNumber,
+            position,
+            employeeName,
+        );
+        await recordOrderPreparation(projectNumber, position, employeeName);
+
+        res.setHeader("Content-Type", "application/pdf");
+        res.setHeader(
+            "Content-Disposition",
+            `attachment; filename="label_${projectNumber}_${position}.pdf"`,
+        );
+        res.send(pdfBuffer);
+    } catch (error: any) {
+        console.error("Error generating prep label:", error);
+        res.status(500).json({
+            error: error.message || "Internal server error",
+        });
     }
 };

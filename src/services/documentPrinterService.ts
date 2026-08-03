@@ -295,3 +295,99 @@ export async function printPngFile(
         fs.unlink(tmpPdfPath, () => {});
     }
 }
+
+// ─── prep-station label PDF ─────────────────────────────────────────────────
+//
+// A plain, generic PDF for the external-items prep station — deliberately
+// NOT tied to any specific printer (Godex/EZPL or otherwise), since the
+// target printer for this station hasn't been decided yet. Whoever prints
+// it can just send this PDF to whatever printer ends up being used.
+//
+// Built by hand (no PDF library) the same way buildPdfFromPng is, but using
+// PDF's built-in Helvetica font instead of an embedded image — a base-14
+// font needs no embedding, so this stays tiny and dependency-free.
+
+function escapePdfText(s: string): string {
+    return s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+}
+
+/**
+ * Builds a one-page A4 PDF identifying an order/position and who prepared
+ * it, with a timestamp. Uses WinAnsiEncoding so common accented Latin
+ * characters (á, é, í, ó, ú, ý, ...) render correctly — NOTE: Czech-specific
+ * letters not present in WinAnsi (č, ř, š, ž, ě, ď, ť, ň) will not render
+ * correctly with this base font; a real Czech name may show those letters
+ * missing or wrong. Proper support would need an embedded TrueType font —
+ * fine for now given this is a provisional label until the real printer
+ * (and label format) is decided.
+ */
+export function buildPrepLabelPdf(
+    projectNumber: string,
+    position: string,
+    employeeName: string,
+): Buffer {
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("cs-CZ");
+    const timeStr = now.toLocaleTimeString("cs-CZ", {
+        hour: "2-digit",
+        minute: "2-digit",
+    });
+
+    const pageWidth = 595.28; // A4, points
+    const pageHeight = 841.89;
+
+    const lines: { text: string; size: number; y: number }[] = [
+        { text: "OBJEDNAVKA", size: 20, y: pageHeight - 120 },
+        { text: projectNumber, size: 48, y: pageHeight - 175 },
+        { text: "POZICE", size: 20, y: pageHeight - 260 },
+        { text: position, size: 48, y: pageHeight - 315 },
+        { text: `Pripravil: ${employeeName}`, size: 16, y: pageHeight - 380 },
+        { text: `${dateStr} ${timeStr}`, size: 12, y: pageHeight - 405 },
+    ];
+
+    const textOps = lines
+        .map(
+            (l) =>
+                `BT /F1 ${l.size} Tf 60 ${l.y.toFixed(2)} Td (${escapePdfText(l.text)}) Tj ET`,
+        )
+        .join("\n");
+
+    const objects: string[] = [];
+    objects.push("<< /Type /Catalog /Pages 2 0 R >>"); // 1
+    objects.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"); // 2
+    objects.push(
+        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
+            `/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
+    ); // 3
+    objects.push(`<< /Length ${textOps.length} >>\nstream\n${textOps}\nendstream`); // 4
+    objects.push(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    ); // 5
+
+    const chunks: Buffer[] = [];
+    const offsets: number[] = [0];
+    let pos = 0;
+    const push = (s: string) => {
+        const b = Buffer.from(s, "latin1");
+        chunks.push(b);
+        pos += b.length;
+    };
+
+    push("%PDF-1.4\n");
+    for (let i = 0; i < objects.length; i++) {
+        offsets.push(pos);
+        push(`${i + 1} 0 obj\n${objects[i]}\nendobj\n`);
+    }
+
+    const xrefStart = pos;
+    const totalObjs = objects.length + 1;
+    push(`xref\n0 ${totalObjs}\n`);
+    push("0000000000 65535 f \n");
+    for (let i = 1; i < totalObjs; i++) {
+        const offset = offsets[i] ?? 0;
+        push(`${offset.toString().padStart(10, "0")} 00000 n \n`);
+    }
+    push(`trailer\n<< /Size ${totalObjs} /Root 1 0 R >>\nstartxref\n${xrefStart}\n%%EOF`);
+
+    return Buffer.concat(chunks);
+}

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import {
     getWorkstations,
+    listWorkplaces,
     receiveOrderUpdate,
     getWorkstationLog,
     importPbom,
@@ -9,17 +10,22 @@ import {
     saveEdited,
     renderDocument,
 } from "../controllers/workstationController";
-import { createOrderCompletion } from "../controllers/completionController";
+import {
+    createOrderCompletion,
+    createPrepLabel,
+} from "../controllers/completionController";
 
 const router = Router();
 
 router.get("/", getWorkstations);
+router.get("/workplaces", listWorkplaces);
 router.post("/order-update", receiveOrderUpdate);
 router.get("/log", getWorkstationLog);
 router.post("/import-pbom", importPbom);
 router.get("/search-pbom", searchPbomHandler);
 router.get("/pbom-types", listPbomTypesHandler);
 router.post("/order-completion", createOrderCompletion);
+router.post("/print-prep-label", createPrepLabel);
 router.post("/save-edited", saveEdited);
 router.get("/documents/:id/render", renderDocument);
 

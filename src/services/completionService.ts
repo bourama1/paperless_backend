@@ -83,4 +83,73 @@ export const recordOrderCompletion = async (
         employee_name: input.employeeName,
         status: input.status,
     });
+
+    // Archival (see archivalService.ts) is driven by this "Complete" tag,
+    // not by FINISHED anymore — reusing ARCHIVE_RETENTION_DAYS, but the
+    // countdown now only starts once EVERY cycle of the order has been
+    // tagged Complete, not just whichever cycle happens to be tagged most
+    // recently (an order isn't done just because door 1 of 6 is done).
+    if (input.status === "complete") {
+        if (!input.projectNumber || !input.position) {
+            console.log(
+                `[ARCHIVE] Order ${input.orderId} tagged Complete with no projectNumber/position — skipping archival queue`,
+            );
+            return;
+        }
+
+        const totalCycles = input.totalCycles ?? 1;
+        const completedResult = await db("order_completion_log")
+            .where({ order_id: input.orderId, status: "complete" })
+            .countDistinct("cycle_index as count")
+            .first();
+        const completedCycles = Number(completedResult?.count) || 0;
+
+        if (completedCycles < totalCycles) {
+            console.log(
+                `[ARCHIVE] Order ${input.orderId}: ${completedCycles}/${totalCycles} cycles tagged Complete — not fully complete yet`,
+            );
+            return;
+        }
+
+        console.log(
+            `[ARCHIVE] Order ${input.orderId}: all ${totalCycles} cycle(s) tagged Complete — queueing for retention archival`,
+        );
+        await db("order_archive_log")
+            .insert({
+                order_id: input.orderId,
+                project_number: input.projectNumber,
+                position: input.position,
+                sales_order: input.salesOrder,
+                product_order: input.productOrder,
+                finished_at: db.fn.now(),
+            })
+            .onConflict("order_id")
+            .merge(["finished_at"]);
+    } else {
+        // Un-complete: if this order previously had a pending (not yet
+        // archived) archival queued from an earlier Complete tag, cancel
+        // it — the order isn't actually done. Already-archived orders are
+        // left alone; there's no clean way to "unarchive" a copied file.
+        await db("order_archive_log")
+            .where({ order_id: input.orderId })
+            .whereNull("archived_at")
+            .delete();
+    }
+};
+
+/**
+ * Records who prepared a Hardware order's externally-sourced items at the
+ * prep station. Called alongside labelPrintingService.printPrepLabel.
+ */
+export const recordOrderPreparation = async (
+    projectNumber: string,
+    position: string,
+    employeeName: string,
+): Promise<void> => {
+    const db = await getDb();
+    await db("order_preparation_log").insert({
+        project_number: projectNumber,
+        position,
+        employee_name: employeeName,
+    });
 };

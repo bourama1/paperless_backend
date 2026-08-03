@@ -1,9 +1,10 @@
 import { Router } from "express";
-import { getRevisionsByDate, exportPdfa } from "../controllers/filesController";
+import { getDocumentsOverview, getDocumentById, exportPdfa } from "../controllers/filesController";
 
 const router = Router();
 
-router.get("/", getRevisionsByDate);
+router.get("/", getDocumentsOverview);
+router.get("/:id", getDocumentById);
 router.post("/:id/export-pdfa", exportPdfa);
 
 export default router;

@@ -210,15 +210,6 @@ describe("Workstation Service", () => {
                         where: () => ({ update: () => thenable(undefined) }),
                     };
                 }
-                if (table === "order_archive_log") {
-                    return {
-                        insert: () => ({
-                            onConflict: () => ({
-                                ignore: () => thenable(undefined),
-                            }),
-                        }),
-                    };
-                }
                 return {};
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -227,43 +218,6 @@ describe("Workstation Service", () => {
 
             expect(db).toHaveBeenCalledWith("workstations");
             expect(handleLabelPrinting).toHaveBeenCalledWith(finishedUpdate);
-        });
-
-        it("should queue the order for retention archival on FINISHED", async () => {
-            const finishedUpdate = {
-                ...mockUpdate,
-                action: "FINISHED" as const,
-            };
-            const db = jest.fn();
-            const archiveInsert = jest.fn(() => ({
-                onConflict: () => ({ ignore: () => thenable(undefined) }),
-            }));
-            db.mockImplementation((table: string) => {
-                if (table === "workstation_log") {
-                    return { insert: () => thenable(undefined) };
-                }
-                if (table === "workstations") {
-                    return {
-                        where: () => ({ update: () => thenable(undefined) }),
-                    };
-                }
-                if (table === "order_archive_log") {
-                    return { insert: archiveInsert };
-                }
-                return {};
-            });
-            (getDb as jest.Mock).mockResolvedValue(db);
-
-            await handleOrderUpdate(finishedUpdate);
-
-            expect(db).toHaveBeenCalledWith("order_archive_log");
-            expect(archiveInsert).toHaveBeenCalledWith(
-                expect.objectContaining({
-                    order_id: mockOrder._id,
-                    project_number: mockOrder.projectNumber,
-                    position: mockOrder.position,
-                }),
-            );
         });
 
         it("should propagate errors", async () => {
@@ -287,15 +241,6 @@ describe("Workstation Service", () => {
                 if (table === "workstations") {
                     return {
                         where: () => ({ update: () => thenable(undefined) }),
-                    };
-                }
-                if (table === "order_archive_log") {
-                    return {
-                        insert: () => ({
-                            onConflict: () => ({
-                                ignore: () => thenable(undefined),
-                            }),
-                        }),
                     };
                 }
                 return {};

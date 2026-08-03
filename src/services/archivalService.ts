@@ -15,7 +15,12 @@ import { convertToPdfA, PdfaConversionError } from "./pdfaService";
 // silently writing archives somewhere unexpected.
 const ARCHIVE_SHARE_PATH = process.env.ARCHIVE_SHARE_PATH || "";
 
-// How many days after an order finishes it becomes eligible for archival.
+// How many days after an order is tagged "Complete" (via the workstation
+// kiosk's completion confirmation) it becomes eligible for archival.
+// NOTE: order_archive_log.finished_at is populated by
+// completionService.recordOrderCompletion when status === "complete", not
+// by the FINISHED order-update event anymore — the column name is a
+// holdover, kept as-is to avoid an unnecessary migration.
 const RETENTION_DAYS = parseInt(process.env.ARCHIVE_RETENTION_DAYS || "7", 10);
 
 // Which doc_manager document types to archive per order. Same env-driven

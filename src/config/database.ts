@@ -41,8 +41,20 @@ const setupDatabase = async (targetDb: Knex) => {
         await targetDb.schema.createTable("documents", (table) => {
             table.increments("id").primary();
             table.string("name").notNullable();
+            table.string("project_number");
+            table.string("position");
+            table.integer("document_type");
             table.timestamp("created_at").defaultTo(targetDb.fn.now());
             table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+        });
+    }
+    // Backfill for pre-existing installs where the table already existed
+    // without these columns.
+    if (!(await targetDb.schema.hasColumn("documents", "project_number"))) {
+        await targetDb.schema.alterTable("documents", (table) => {
+            table.string("project_number");
+            table.string("position");
+            table.integer("document_type");
         });
     }
 
@@ -71,6 +83,18 @@ const setupDatabase = async (targetDb: Knex) => {
             table.text("current_order_data");
             table.integer("is_active").defaultTo(1);
             table.timestamp("last_polled_at");
+            table.integer("cycle_index").defaultTo(1);
+            table.integer("total_cycles").defaultTo(1);
+        });
+    }
+    // Backfill for pre-existing installs where "workstations" already
+    // existed before cycle_index/total_cycles were added to the schema —
+    // otherwise handleOrderUpdate's UPDATE against these columns fails with
+    // "column does not exist" on every order-update call.
+    if (!(await targetDb.schema.hasColumn("workstations", "cycle_index"))) {
+        await targetDb.schema.alterTable("workstations", (table) => {
+            table.integer("cycle_index").defaultTo(1);
+            table.integer("total_cycles").defaultTo(1);
         });
     }
 
@@ -215,6 +239,21 @@ const setupDatabase = async (targetDb: Knex) => {
             table.string("sales_order");
             table.string("employee_name").notNullable();
             table.string("status").notNullable(); // complete | missing_product | shipped_incomplete
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
+
+    // 13. order_preparation_log table — for the external-items prep station:
+    // a worker searches for a Hardware order's document, physically
+    // prepares items sourced outside P2L, then prints a short label for
+    // that order/position. Records who did the preparing. See
+    // completionService.ts / labelPrintingService.printPrepLabel.
+    if (!(await targetDb.schema.hasTable("order_preparation_log"))) {
+        await targetDb.schema.createTable("order_preparation_log", (table) => {
+            table.increments("id").primary();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.string("employee_name").notNullable();
             table.timestamp("created_at").defaultTo(targetDb.fn.now());
         });
     }

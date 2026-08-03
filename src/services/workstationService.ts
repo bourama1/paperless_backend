@@ -134,43 +134,24 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
 
         // Keep the workstations table's cycle_index/total_cycles current so
         // GET /workstations can show live cycle progress (e.g. "2/6")
-        // instead of just quantity. These columns already existed in the
-        // schema but were never actually written — the external
-        // WORKSTATIONS_API_URL poll doesn't carry cycle info, only these
-        // order-update webhook calls do.
-        await db("workstations").where({ name: update.order.workplace }).update({
-            cycle_index: update.cycleIndex,
-            total_cycles: update.totalCycles,
-        });
+        // instead of just quantity. Matched by current_order_id — NOT by
+        // name, since "name" is the physical station id from the polling
+        // feed (e.g. "WS_5") while update.order.workplace is a work-TYPE
+        // string (e.g. "Hardware") from a completely different feed. Those
+        // two are never equal, so matching on name here silently never
+        // updated anything.
+        await db("workstations")
+            .where({ current_order_id: update.order._id })
+            .update({
+                cycle_index: update.cycleIndex,
+                total_cycles: update.totalCycles,
+            });
 
         if (update.action === "FINISHED") {
+            // Same fix as above — match by current_order_id, not name.
             await db("workstations")
-                .where({ name: update.order.workplace })
+                .where({ current_order_id: update.order._id })
                 .update({ current_order_id: null, current_order_data: null });
-
-            // Queue this order for retention archival (see services/archivalService.ts).
-            // We only have projectNumber/position to look the document(s) back up in
-            // doc_manager later, same as printDocumentsForOrder does on STARTED — so
-            // skip logging if those aren't present, there'd be nothing to fetch.
-            if (update.order.projectNumber && update.order.position) {
-                await db("order_archive_log")
-                    .insert({
-                        order_id: update.order._id,
-                        project_number: update.order.projectNumber,
-                        position: update.order.position,
-                        sales_order: update.order.salesOrder,
-                        product_order: update.order.productOrder,
-                        finished_at: update.datetime
-                            ? new Date(update.datetime)
-                            : db.fn.now(),
-                    })
-                    .onConflict("order_id")
-                    .ignore();
-            } else {
-                console.log(
-                    `[ARCHIVE] Order ${update.order._id} FINISHED with no projectNumber/position — skipping archival queue`,
-                );
-            }
         }
 
         if (update.action === "STARTED") {
@@ -381,23 +362,52 @@ export const importDocument = async (req: PbomImportRequest) => {
     const docRef = `docmgr://${req.projectNumber}/${req.position}/${docType}`;
 
     const db = await getDb();
-    const [docId] = await db("documents")
-        .insert({ name: originalName })
-        .returning("id");
-    const resolvedDocId = typeof docId === "object" ? docId.id : docId;
 
-    await db("revisions").insert({
-        document_id: resolvedDocId,
-        filename: docRef,
-        version: 1,
-    });
+    // Find-or-create: re-opening the same projectNumber/position/documentType
+    // should reuse the same documents row rather than creating a fresh
+    // duplicate every time it's tapped — otherwise the documents overview
+    // (see filesController.getDocumentsOverview) would show one row per
+    // *open*, not one row per actual document.
+    let doc = await db("documents")
+        .where({
+            project_number: req.projectNumber,
+            position: req.position,
+            document_type: docType,
+        })
+        .first();
 
-    const newDoc = await db("documents").where({ id: resolvedDocId }).first();
+    if (!doc) {
+        const [docId] = await db("documents")
+            .insert({
+                name: originalName,
+                project_number: req.projectNumber,
+                position: req.position,
+                document_type: docType,
+            })
+            .returning("id");
+        const resolvedDocId = typeof docId === "object" ? docId.id : docId;
+
+        await db("revisions").insert({
+            document_id: resolvedDocId,
+            filename: docRef,
+            version: 1,
+        });
+
+        doc = await db("documents").where({ id: resolvedDocId }).first();
+    } else if (doc.name !== originalName) {
+        // doc_manager's filename changed since we last saw it (e.g. a new
+        // revision was generated there) — keep our display name current.
+        await db("documents")
+            .where({ id: doc.id })
+            .update({ name: originalName, updated_at: db.fn.now() });
+        doc = await db("documents").where({ id: doc.id }).first();
+    }
+
     const revisions = await db("revisions")
-        .where({ document_id: resolvedDocId })
+        .where({ document_id: doc.id })
         .orderBy("version", "desc");
 
-    return { ...newDoc, revisions };
+    return { ...doc, revisions };
 };
 
 const CUSTOMER_PRODUCTION = 0;

@@ -94,6 +94,26 @@ export const getWorkstations = async (req: Request, res: Response) => {
     }
 };
 
+/**
+ * Lists the distinct work-TYPE strings actually seen in order-update
+ * events (e.g. "Hardware", "Motor") — as opposed to physical station
+ * names from the polling feed (e.g. "WS_5"). The completion kiosk needs
+ * this list, since FINISHED events only ever carry order.workplace, never
+ * a physical station name.
+ */
+export const listWorkplaces = async (req: Request, res: Response) => {
+    try {
+        const db = await getDb();
+        const rows = await db("workstation_log")
+            .distinct("workstation_name")
+            .orderBy("workstation_name");
+        res.json(rows.map((r: any) => r.workstation_name));
+    } catch (error) {
+        console.error("Error listing workplaces:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
 export const receiveOrderUpdate = async (req: Request, res: Response) => {
     const update = req.body as OrderUpdate;
 
