@@ -28,20 +28,22 @@ const execFileAsync = promisify(execFile);
 // re-reading the env var themselves.
 export const GHOSTSCRIPT_BIN = process.env.GHOSTSCRIPT_PATH || "gs";
 
-const ICC_PROFILE_PATH = path.join(
-    __dirname,
-    "..",
-    "config",
-    "icc",
-    "sRGB2014.icc",
-);
-const PDFA_DEF_TEMPLATE_PATH = path.join(
-    __dirname,
-    "..",
-    "config",
-    "pdfa",
-    "PDFA_def_template.ps",
-);
+function resolveResourcePath(...segments: string[]) {
+    // When packaged with pkg, static files are usually either embedded into the
+    // snapshot (if included as assets at package time) or shipped next to the
+    // executable. Prefer a copy next to the exe (so build scripts that copy
+    // config\ to the output dir work), otherwise fall back to a bundled path.
+    const exeDir = path.dirname(process.execPath || "");
+    if ((process as any).pkg && exeDir) {
+        const external = path.join(exeDir, ...segments);
+        if (fs.existsSync(external)) return external;
+        // Fall through to bundled path.
+    }
+    return path.join(__dirname, "..", ...segments);
+}
+
+const ICC_PROFILE_PATH = resolveResourcePath("config", "icc", "sRGB2014.icc");
+const PDFA_DEF_TEMPLATE_PATH = resolveResourcePath("config", "pdfa", "PDFA_def_template.ps");
 
 export type PdfaLevel = 1 | 2 | 3;
 
@@ -99,7 +101,17 @@ export async function convertToPdfA(
 
     // Build a per-conversion PDFA_def.ps from the bundled template, with the
     // /Title and /ICCProfile fields filled in and escaped for PostScript.
-    const template = fs.readFileSync(PDFA_DEF_TEMPLATE_PATH, "utf-8");
+    let template: string;
+    try {
+        template = fs.readFileSync(PDFA_DEF_TEMPLATE_PATH, "utf-8");
+    } catch (err: any) {
+        // Provide a clearer error explaining how to fix the packaging/runtime issue.
+        throw new PdfaConversionError(
+            `PDFA template not found at ${PDFA_DEF_TEMPLATE_PATH}. ` +
+                `When running as a packaged executable ensure config/pdfa/PDFA_def_template.ps is copied next to the exe or included as a pkg asset at build time. Original error: ${err?.message || err}`,
+        );
+    }
+
     const iccPathForPs = ICC_PROFILE_PATH.replace(/\\/g, "/"); // gs accepts forward slashes on Windows too
     const customized = template
         .replace("/Title (Title)", `/Title (${escapePsString(title)})`)

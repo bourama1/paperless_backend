@@ -133,25 +133,48 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
         });
 
         // Keep the workstations table's cycle_index/total_cycles current so
-        // GET /workstations can show live cycle progress (e.g. "2/6")
-        // instead of just quantity. Matched by current_order_id — NOT by
-        // name, since "name" is the physical station id from the polling
-        // feed (e.g. "WS_5") while update.order.workplace is a work-TYPE
-        // string (e.g. "Hardware") from a completely different feed. Those
-        // two are never equal, so matching on name here silently never
-        // updated anything.
-        await db("workstations")
-            .where({ current_order_id: update.order._id })
-            .update({
-                cycle_index: update.cycleIndex,
-                total_cycles: update.totalCycles,
-            });
+        // GET /workstations can show live cycle progress (e.g. "2/6").
+        // Try to update by current_order_id first; if the polling feed hasn't
+        // written the current_order_id yet, also try matching the current_order_data
+        // JSON blob which may contain the order's _id.
+        const orderId = update.order._id;
+
+        try {
+            const updatedById = await db("workstations")
+                .where({ current_order_id: orderId })
+                .update({
+                    cycle_index: update.cycleIndex,
+                    total_cycles: update.totalCycles,
+                });
+            // Attempt a second update for rows where only the JSON blob contains the order id
+            const updatedByJson = await db("workstations")
+                .whereRaw("current_order_data LIKE ?", [`%\"_id\":\"${orderId}\"%`])
+                .update({
+                    cycle_index: update.cycleIndex,
+                    total_cycles: update.totalCycles,
+                });
+
+            console.log(
+                `[WORKSTATIONS] Updated cycle for order ${orderId}: byId=${updatedById}, byJson=${updatedByJson}`,
+            );
+        } catch (err: any) {
+            console.error(`[WORKSTATIONS] Failed to update cycle_index for order ${orderId}:`, err);
+        }
 
         if (update.action === "FINISHED") {
-            // Same fix as above — match by current_order_id, not name.
-            await db("workstations")
-                .where({ current_order_id: update.order._id })
-                .update({ current_order_id: null, current_order_data: null });
+            try {
+                const clearedById = await db("workstations")
+                    .where({ current_order_id: orderId })
+                    .update({ current_order_id: null, current_order_data: null });
+                const clearedByJson = await db("workstations")
+                    .whereRaw("current_order_data LIKE ?", [`%\"_id\":\"${orderId}\"%`])
+                    .update({ current_order_id: null, current_order_data: null });
+                console.log(
+                    `[WORKSTATIONS] Cleared order ${orderId} from workstations: byId=${clearedById}, byJson=${clearedByJson}`,
+                );
+            } catch (err: any) {
+                console.error(`[WORKSTATIONS] Failed to clear finished order ${orderId}:`, err);
+            }
         }
 
         if (update.action === "STARTED") {
