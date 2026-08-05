@@ -168,7 +168,12 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
 
         const { io } = require("../index");
         if (io) {
+            // Emit the specific order update event (for listeners that want the payload)
             io.emit("workstation-order-update", update);
+            // Also emit a generic workstations-updated event so clients that only
+            // listen for the polling update trigger will refetch their /workstations
+            // view (this ensures STARTED events also refresh all clients immediately).
+            io.emit("workstations-updated");
         }
     } catch (error) {
         console.error("Error handling order update:", error);
