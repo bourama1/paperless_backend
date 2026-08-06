@@ -1,9 +1,25 @@
+// dotenv MUST be imported and configured before anything else. Several
+// services (pdfaService, documentPrinterService, labelPrintingService, ...)
+// read process.env.* into module-level constants the moment they're first
+// required, e.g. `const GHOSTSCRIPT_BIN = process.env.GHOSTSCRIPT_PATH ||
+// "gs"`. If those modules get pulled in (even transitively, via routes ->
+// controllers -> services) before dotenv.config() runs, they permanently
+// capture the fallback default instead of the real .env value — which is
+// exactly what was happening here: GHOSTSCRIPT_PATH from .env was being
+// ignored because filesRoutes/workstationRoutes (imported below) eagerly
+// require pdfaService.ts before dotenv.config() had a chance to run.
+//
+// Keep this import + config() call as the very first thing in this file,
+// above every other import, so process.env is fully populated before any
+// other module is loaded.
+import dotenv from "dotenv";
+dotenv.config();
+
 import express from "express";
 import { createServer } from "http";
 import { Server } from "socket.io";
 import cors from "cors";
 import morgan from "morgan";
-import dotenv from "dotenv";
 import path from "path";
 import fs from "fs";
 
@@ -13,9 +29,6 @@ import queueRoutes from "./routes/queue";
 import filesRoutes from "./routes/files";
 import workstationRoutes from "./routes/workstations";
 import employeesRoutes from "./routes/employees";
-
-// Load environment variables
-dotenv.config();
 
 const app = express();
 const httpServer = createServer(app);

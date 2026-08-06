@@ -5,7 +5,11 @@ import path from "path";
 import crypto from "crypto";
 import { getDb } from "../config/database";
 import { DOC_MANAGER_URL } from "./workstationService";
-import { documentTypeName } from "../config/documentTypes";
+import {
+    documentTypeName,
+    resolvePbomTypeForWorkplace,
+    DOCUMENT_TYPES,
+} from "../config/documentTypes";
 import { convertToPdfA, PdfaConversionError } from "./pdfaService";
 
 // Network share where archived PDF/A copies are written, e.g.
@@ -22,15 +26,6 @@ const ARCHIVE_SHARE_PATH = process.env.ARCHIVE_SHARE_PATH || "";
 // by the FINISHED order-update event anymore — the column name is a
 // holdover, kept as-is to avoid an unnecessary migration.
 const RETENTION_DAYS = parseInt(process.env.ARCHIVE_RETENTION_DAYS || "7", 10);
-
-// Which doc_manager document types to archive per order. Same env-driven
-// list style as workstationService's DOCUMENTS_TYPES (printing on STARTED).
-const ARCHIVE_DOCUMENT_TYPES = (
-    process.env.ARCHIVE_DOCUMENT_TYPES || "14,4,5,21"
-)
-    .split(",")
-    .map((s) => parseInt(s.trim(), 10))
-    .filter((n) => !isNaN(n));
 
 // How often the sweep runs. Archival isn't time-critical (it's driven by a
 // multi-day retention window), so this defaults to every 6 hours rather
@@ -105,18 +100,56 @@ async function fetchDocumentBuffer(
 }
 
 /**
- * Archives one finished order: fetches every configured document type from
- * doc_manager, converts each to real PDF/A, and writes it to
- * ARCHIVE_SHARE_PATH/{projectNumber}/{position}/{type}_pdfa.pdf.
+ * Resolves which PBOM document_type(s) actually apply to a finished order,
+ * based on every distinct workplace it was seen at (workstation_log.workstation_name
+ * carries update.order.workplace for every STARTED/FINISHED event — see
+ * workstationService.handleOrderUpdate). An order that passed through both
+ * "Hardware" and "Motor" gets both PBOM_HARDWARE and PBOM_MOTOR archived;
+ * an order that only ever hit "Hardware" gets only PBOM_HARDWARE.
  *
- * Missing document types (doc_manager 404) are skipped, not fatal — an
- * order legitimately might not have every type. A hard failure (network
- * error, Ghostscript failure, etc.) throws so the caller can record it and
- * retry on the next sweep.
+ * Falls back to PBOM_HARDWARE if there's no workstation_log history at all
+ * for this order_id (shouldn't normally happen, but keeps archival from
+ * silently archiving nothing for an edge case like a manually-inserted
+ * order_archive_log row).
+ */
+async function getPbomTypesForOrder(orderId: string): Promise<number[]> {
+    const db = await getDb();
+    const rows: { workstation_name: string }[] = await db("workstation_log")
+        .distinct("workstation_name")
+        .where({ order_id: orderId });
+
+    const types = new Set<number>();
+    for (const row of rows) {
+        types.add(resolvePbomTypeForWorkplace(row.workstation_name));
+    }
+
+    if (types.size === 0) {
+        console.log(
+            `[ARCHIVE] No workstation_log history for order ${orderId} — falling back to PBOM_HARDWARE`,
+        );
+        types.add(DOCUMENT_TYPES.PBOM_HARDWARE);
+    }
+
+    return Array.from(types);
+}
+
+/**
+ * Archives one finished order: for each PBOM type actually relevant to this
+ * order (see getPbomTypesForOrder — derived from which real production
+ * workplaces it passed through), fetches that PBOM from doc_manager,
+ * converts it to real PDF/A, and writes it to
+ * ARCHIVE_SHARE_PATH/{projectNumber}/{position}/{pbomType}_pdfa.pdf.
+ *
+ * Only PBOM documents are archived — declarations, drawings, confirmations,
+ * etc. are intentionally not part of retention archival.
+ *
+ * A missing PBOM (doc_manager 404) is skipped, not fatal. A hard failure
+ * (network error, Ghostscript failure, etc.) throws so the caller can
+ * record it and retry on the next sweep.
  */
 async function archiveOrder(
     row: ArchiveLogRow,
-): Promise<{ archivedCount: number }> {
+): Promise<{ archivedCount: number; attemptedCount: number }> {
     const orderDir = path.join(
         ARCHIVE_SHARE_PATH,
         row.project_number,
@@ -124,7 +157,13 @@ async function archiveOrder(
     );
     let archivedCount = 0;
 
-    for (const documentType of ARCHIVE_DOCUMENT_TYPES) {
+    const pbomTypes = await getPbomTypesForOrder(row.order_id);
+    console.log(
+        `[ARCHIVE] Order ${row.order_id} (${row.project_number}/${row.position}) — ` +
+            `archiving PBOM type(s): ${pbomTypes.map(documentTypeName).join(", ")}`,
+    );
+
+    for (const documentType of pbomTypes) {
         const doc = await fetchDocumentBuffer(
             row.project_number,
             row.position,
@@ -132,7 +171,7 @@ async function archiveOrder(
         );
         if (!doc) {
             console.log(
-                `[ARCHIVE] No document of type ${documentType} for order ${row.order_id} ` +
+                `[ARCHIVE] No document of type ${documentType} (${documentTypeName(documentType)}) for order ${row.order_id} ` +
                     `(${row.project_number}/${row.position}) — skipping`,
             );
             continue;
@@ -161,7 +200,7 @@ async function archiveOrder(
         }
     }
 
-    return { archivedCount };
+    return { archivedCount, attemptedCount: pbomTypes.length };
 }
 
 /**
@@ -211,13 +250,13 @@ export async function runArchivalSweep(): Promise<void> {
 
         for (const row of dueRows) {
             try {
-                const { archivedCount } = await archiveOrder(row);
+                const { archivedCount, attemptedCount } = await archiveOrder(row);
                 await db("order_archive_log").where({ id: row.id }).update({
                     archived_at: db.fn.now(),
                     last_error: null,
                 });
                 console.log(
-                    `[ARCHIVE] Order ${row.order_id} archived (${archivedCount}/${ARCHIVE_DOCUMENT_TYPES.length} document types found)`,
+                    `[ARCHIVE] Order ${row.order_id} archived (${archivedCount}/${attemptedCount} PBOM document(s) found)`,
                 );
             } catch (error: any) {
                 const message =
@@ -241,3 +280,4 @@ export async function runArchivalSweep(): Promise<void> {
         sweepInFlight = false;
     }
 }
+

@@ -75,17 +75,63 @@ async function resolveDocumentStream(
 
 // ── exports ──────────────────────────────────────────────────────────────────
 
+// Pulls the order id a workstation row is currently pointing at, whether
+// it's in the dedicated current_order_id column or only embedded in the
+// current_order_data JSON blob (see handleOrderUpdate's comment on why
+// both can happen).
+function extractOrderId(ws: { current_order_id: string | null; current_order_data: string | null }): string | null {
+    if (ws.current_order_id) return ws.current_order_id;
+    if (ws.current_order_data) {
+        try {
+            const parsed = JSON.parse(ws.current_order_data);
+            if (parsed?._id) return parsed._id;
+        } catch {
+            // malformed JSON blob — nothing we can do
+        }
+    }
+    return null;
+}
+
 export const getWorkstations = async (req: Request, res: Response) => {
     try {
         const db = await getDb();
         const workstations = await db("workstations").orderBy("name");
 
-        const result = workstations.map((ws: any) => ({
-            ...ws,
-            current_order_data: ws.current_order_data
-                ? JSON.parse(ws.current_order_data)
-                : null,
-        }));
+        // Look up cycle_index/total_cycles from order_cycle_state, keyed by
+        // order id, rather than trusting workstations.cycle_index/total_cycles
+        // directly — those columns are only reliable once pollWorkstations()
+        // has caught up to this order, which handleOrderUpdate can't
+        // guarantee (see its comment). order_cycle_state is written
+        // unconditionally on every order-update, so it's always current for
+        // whichever order this row is actually pointing at right now.
+        const orderIds = workstations
+            .map((ws: any) => extractOrderId(ws))
+            .filter((id: string | null): id is string => !!id);
+
+        const cycleStates = orderIds.length
+            ? await db("order_cycle_state").whereIn("order_id", orderIds)
+            : [];
+        const cycleByOrderId = new Map(
+            cycleStates.map((row: any) => [row.order_id, row]),
+        );
+
+        const result = workstations.map((ws: any) => {
+            const orderId = extractOrderId(ws);
+            const cycleState = orderId ? cycleByOrderId.get(orderId) : undefined;
+
+            return {
+                ...ws,
+                current_order_data: ws.current_order_data
+                    ? JSON.parse(ws.current_order_data)
+                    : null,
+                // Fall back to 1/1 (not the workstations row's own stale
+                // columns) when there's no order_cycle_state record yet,
+                // e.g. right after a fresh install or for a station with no
+                // current order.
+                cycle_index: cycleState ? cycleState.cycle_index : 1,
+                total_cycles: cycleState ? cycleState.total_cycles : 1,
+            };
+        });
 
         res.json(result);
     } catch (error) {

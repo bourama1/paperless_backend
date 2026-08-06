@@ -125,6 +125,34 @@ function resolveScanPrefix(workplace: string): string | undefined {
     return WORKPLACE_TO_SCAN_PREFIX[normalizeWorkplace(workplace)];
 }
 
+// ─── per-workplace type narrowing ──────────────────────────────────────────
+//
+// "Motor" and "Hardware" (and "Předmontáž optolišty") all share the same
+// SCAN_PREFIX.HARDWARE group, because in the original barcode-driven flow
+// they were one physical package. Now that printing is triggered per real
+// production station, they need separate label subsets even though they
+// resolve to the same scan prefix.
+//
+// Confirmed against label-type-config.json: of the 20 types under
+// SCAN_PREFIX.HARDWARE, the "*_hw_kr" suffixed ones (t10_hw_kr, t21_hw_kr,
+// t25_hw_kr, t29_hw_kr, t11_hw_kr, t15_hw_kr) are the hardware+door-leaf
+// combo sticker printed at the Hardware station; every other type in that
+// group (motor, mot_prisl, lista_motor, zavora, ...) belongs to Motor.
+//
+// Workplaces not listed here get every type that matches their scan prefix,
+// unfiltered — this only narrows within a scan-prefix group that's shared
+// by more than one workplace.
+const WORKPLACE_TYPE_FILTER: Record<string, (labelType: string) => boolean> =
+    {
+        motor: (labelType) => !labelType.endsWith("_hw_kr"),
+        hardware: (labelType) => labelType.endsWith("_hw_kr"),
+        predmontazoptolisty: (labelType) => labelType.endsWith("_hw_kr"),
+    };
+
+function resolveTypeFilter(workplace: string): ((labelType: string) => boolean) | undefined {
+    return WORKPLACE_TYPE_FILTER[normalizeWorkplace(workplace)];
+}
+
 // ─── env ─────────────────────────────────────────────────────────────────────
 
 const LABEL_PRINT_TRIGGER = process.env.LABEL_PRINT_TRIGGER || "STARTED";
@@ -938,6 +966,10 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         return;
     }
 
+    // Some workplaces (Motor, Hardware, ...) share the same scan-prefix
+    // group but still need distinct label subsets — see WORKPLACE_TYPE_FILTER.
+    const typeFilter = resolveTypeFilter(order.workplace);
+
     // Parametry matching — mirrors VBA scan of parametry sheet, but keyed off
     // the workplace-derived prefix instead of a physically-scanned barcode.
     // Find ALL matching parametry entries (not just the last one).
@@ -946,7 +978,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         { copies: number; cycleFilter: CycleFilter }
     >();
     for (const entry of parametryConfig) {
-        if (entry.scanC === prefix) {
+        if (entry.scanC === prefix && (!typeFilter || typeFilter(entry.type))) {
             matchingTypes.set(entry.type, {
                 copies: entry.copies,
                 cycleFilter: cycleFilterFromLastCycleNum(entry.lastCycleNum),
@@ -998,6 +1030,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     for (const entry of parametryConfig) {
         // Only process entries matching the workplace-derived prefix (each entry checked independently)
         if (entry.scanC !== prefix) continue;
+        if (typeFilter && !typeFilter(entry.type)) continue;
 
         const cf = cycleFilterFromLastCycleNum(entry.lastCycleNum);
 

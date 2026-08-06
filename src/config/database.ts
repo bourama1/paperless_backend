@@ -98,6 +98,26 @@ const setupDatabase = async (targetDb: Knex) => {
         });
     }
 
+    // 3b. order_cycle_state table — authoritative cycle_index/total_cycles
+    // per order, keyed by order_id. Written unconditionally on every
+    // order-update (see handleOrderUpdate), independent of whether the
+    // separately-polled `workstations` table has caught up to this order
+    // yet. Previously cycle_index/total_cycles were only written by
+    // matching workstations.current_order_id — which is populated on its
+    // own timer by pollWorkstations() — so a webhook arriving before the
+    // next poll would silently fail to update anything (0 rows matched),
+    // leaving stale values from whatever order previously occupied that
+    // station row. Reading cycle progress from here instead removes that
+    // race entirely.
+    if (!(await targetDb.schema.hasTable("order_cycle_state"))) {
+        await targetDb.schema.createTable("order_cycle_state", (table) => {
+            table.string("order_id").primary();
+            table.integer("cycle_index").notNullable().defaultTo(1);
+            table.integer("total_cycles").notNullable().defaultTo(1);
+            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+        });
+    }
+
     // 4. workstation_log table
     if (!(await targetDb.schema.hasTable("workstation_log"))) {
         await targetDb.schema.createTable("workstation_log", (table) => {

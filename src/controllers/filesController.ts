@@ -8,6 +8,12 @@ import { convertToPdfA, PdfaConversionError } from "../services/pdfaService";
  * Returns a single document's own record (name, projectNumber, position,
  * documentType) — used by the document viewer to know which order/position
  * it belongs to, e.g. for the prep-station "print label" action.
+ *
+ * Also annotated with the same status/completion/revisioned info the
+ * overview list carries (see getDocumentsOverview), so the document viewer
+ * can decide whether to show the "Finish order" action — that action is
+ * only offered from inside an opened, revisioned document, not from the
+ * overview list itself.
  */
 export const getDocumentById = async (req: Request, res: Response) => {
     try {
@@ -18,7 +24,36 @@ export const getDocumentById = async (req: Request, res: Response) => {
         if (!doc) {
             return res.status(404).json({ error: "Document not found" });
         }
-        res.json(doc);
+
+        const latestCompletion = await db("order_completion_log")
+            .where({
+                project_number: doc.project_number,
+                position: doc.position,
+            })
+            .orderBy("created_at", "desc")
+            .first();
+
+        const hasEditedRevision = await db("revisions")
+            .where({ document_id: doc.id })
+            .whereNot("filename", "like", "docmgr://%")
+            .first();
+
+        res.json({
+            ...doc,
+            status: latestCompletion?.status || null,
+            revisioned: !!hasEditedRevision,
+            completion:
+                latestCompletion ?
+                    {
+                        order_id: latestCompletion.order_id,
+                        workstation: latestCompletion.workstation,
+                        cycle_index: latestCompletion.cycle_index,
+                        total_cycles: latestCompletion.total_cycles,
+                        product_order: latestCompletion.product_order,
+                        sales_order: latestCompletion.sales_order,
+                    }
+                :   null,
+        });
     } catch (error) {
         console.error("Error fetching document:", error);
         res.status(500).json({ error: "Internal server error" });

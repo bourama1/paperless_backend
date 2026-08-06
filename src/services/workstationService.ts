@@ -73,6 +73,19 @@ export interface OrderUpdate {
     action: "STARTED" | "FINISHED";
 }
 
+/**
+ * Extracts the pipeline-sequence number from a station name following the
+ * "WS_<number>" convention (WS_01, WS_02, ... — leading zeros fine), so
+ * FINISHED handling can tell which of several matching stations is
+ * furthest along the line. Returns null for anything that doesn't match,
+ * so callers can fall back to a safer default instead of guessing.
+ */
+function parseWorkstationSequence(name: string): number | null {
+    const match = /^WS_(\d+)$/i.exec(name.trim());
+    if (!match) return null;
+    return parseInt(match[1]!, 10);
+}
+
 export const pollWorkstations = async () => {
     try {
         const response = await axios.get<WorkstationProcess[]>(
@@ -132,46 +145,127 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
             total_cycles: update.totalCycles,
         });
 
-        // Keep the workstations table's cycle_index/total_cycles current so
-        // GET /workstations can show live cycle progress (e.g. "2/6").
-        // Try to update by current_order_id first; if the polling feed hasn't
-        // written the current_order_id yet, also try matching the current_order_data
-        // JSON blob which may contain the order's _id.
+        // Persist cycle_index/total_cycles keyed directly by order_id — this
+        // is the authoritative record GET /workstations reads from (see
+        // getWorkstations). Written unconditionally on the first event for
+        // an order, but MONOTONIC after that — see below.
         const orderId = update.order._id;
 
         try {
-            const updatedById = await db("workstations")
-                .where({ current_order_id: orderId })
-                .update({
-                    cycle_index: update.cycleIndex,
-                    total_cycles: update.totalCycles,
-                });
-            // Attempt a second update for rows where only the JSON blob contains the order id
-            const updatedByJson = await db("workstations")
-                .whereRaw("current_order_data LIKE ?", [`%\"_id\":\"${orderId}\"%`])
-                .update({
-                    cycle_index: update.cycleIndex,
-                    total_cycles: update.totalCycles,
-                });
+            const existingCycleState = await db("order_cycle_state")
+                .where({ order_id: orderId })
+                .first();
 
-            console.log(
-                `[WORKSTATIONS] Updated cycle for order ${orderId}: byId=${updatedById}, byJson=${updatedByJson}`,
-            );
+            // A batch order (quantity > 1) can have more than one cycle
+            // actively in progress at once — different physical stations
+            // working different units of the same order/position
+            // concurrently. Events for those cycles don't necessarily
+            // arrive in cycle-number order (e.g. a FINISHED for an older,
+            // still-in-flight cycle can land after a STARTED for a newer
+            // one that's already further along). Since cycle numbers only
+            // ever increase for a given order, only accept an update whose
+            // cycle_index is >= what's already recorded — this keeps the
+            // tracked value pinned to whichever cycle is furthest along,
+            // and ignores a late-arriving update for a cycle that's
+            // already been superseded, rather than regressing it.
+            if (
+                !existingCycleState ||
+                update.cycleIndex >= existingCycleState.cycle_index
+            ) {
+                await db("order_cycle_state")
+                    .insert({
+                        order_id: orderId,
+                        cycle_index: update.cycleIndex,
+                        total_cycles: update.totalCycles,
+                        updated_at: db.fn.now(),
+                    })
+                    .onConflict("order_id")
+                    .merge({
+                        cycle_index: update.cycleIndex,
+                        total_cycles: update.totalCycles,
+                        updated_at: db.fn.now(),
+                    });
+
+                console.log(
+                    `[WORKSTATIONS] Saved cycle state for order ${orderId}: ${update.cycleIndex}/${update.totalCycles}`,
+                );
+            } else {
+                console.log(
+                    `[WORKSTATIONS] Ignoring stale cycle update for order ${orderId}: ` +
+                        `${update.action} cycle ${update.cycleIndex} arrived after cycle ${existingCycleState.cycle_index} was already recorded — ` +
+                        `a newer cycle of this order is still in progress elsewhere`,
+                );
+            }
         } catch (err: any) {
-            console.error(`[WORKSTATIONS] Failed to update cycle_index for order ${orderId}:`, err);
+            console.error(`[WORKSTATIONS] Failed to save cycle state for order ${orderId}:`, err);
         }
 
         if (update.action === "FINISHED") {
             try {
-                const clearedById = await db("workstations")
-                    .where({ current_order_id: orderId })
-                    .update({ current_order_id: null, current_order_data: null });
-                const clearedByJson = await db("workstations")
-                    .whereRaw("current_order_data LIKE ?", [`%\"_id\":\"${orderId}\"%`])
-                    .update({ current_order_id: null, current_order_data: null });
-                console.log(
-                    `[WORKSTATIONS] Cleared order ${orderId} from workstations: byId=${clearedById}, byJson=${clearedByJson}`,
+                // A FINISHED event doesn't identify which physical
+                // workstation sent it — only the order_id. Normally that's
+                // fine (one workstation row matches), but for a batch order
+                // with multiple physical stations concurrently mid-cycle on
+                // the SAME order_id, several rows can match at once.
+                //
+                // FINISHED is only ever emitted by the LAST workstation in
+                // the line (STARTED is emitted by the first, on entry) — so
+                // when several stations match, we don't need to guess: pick
+                // the one that's furthest along the line and clear only
+                // that one. Station names follow a "WS_<number>" pipeline-
+                // sequence convention (WS_01 = first, WS_05 = last, etc.),
+                // so the highest-numbered matching station is the one that
+                // just finished. If any matching name doesn't parse as
+                // WS_<number>, we can't trust the ordering — fall back to
+                // skipping the eager clear and let the next
+                // pollWorkstations() tick resolve it safely instead.
+                const matchingById = await db("workstations").where({
+                    current_order_id: orderId,
+                });
+                const matchingByJson = await db("workstations").whereRaw(
+                    "current_order_data LIKE ?",
+                    [`%\"_id\":\"${orderId}\"%`],
                 );
+                const matchingRows = new Map<number, { id: number; name: string }>();
+                for (const row of [...matchingById, ...matchingByJson]) {
+                    matchingRows.set(row.id, { id: row.id, name: row.name });
+                }
+                const matches = Array.from(matchingRows.values());
+
+                if (matches.length === 1) {
+                    await db("workstations")
+                        .where({ id: matches[0]!.id })
+                        .update({ current_order_id: null, current_order_data: null });
+                    console.log(
+                        `[WORKSTATIONS] Cleared order ${orderId} from workstation ${matches[0]!.name} (unambiguous match)`,
+                    );
+                } else if (matches.length > 1) {
+                    const parsed = matches.map((m) => ({
+                        ...m,
+                        seq: parseWorkstationSequence(m.name),
+                    }));
+                    const lastStation =
+                        parsed.every((m) => m.seq !== null) ?
+                            parsed.reduce((a, b) => ((b.seq as number) > (a.seq as number) ? b : a))
+                        :   null;
+
+                    if (lastStation) {
+                        await db("workstations")
+                            .where({ id: lastStation.id })
+                            .update({ current_order_id: null, current_order_data: null });
+                        console.log(
+                            `[WORKSTATIONS] Order ${orderId} matched ${matches.length} workstations ` +
+                                `(${matches.map((m) => m.name).join(", ")}) — cleared ${lastStation.name} as the last ` +
+                                `station in the line (FINISHED is only ever emitted there)`,
+                        );
+                    } else {
+                        console.log(
+                            `[WORKSTATIONS] Order ${orderId} matches ${matches.length} workstation rows ` +
+                                `(${matches.map((m) => m.name).join(", ")}) but at least one name doesn't parse as ` +
+                                `WS_<number> — can't determine which is last, skipping eager clear; next poll will resolve it`,
+                        );
+                    }
+                }
             } catch (err: any) {
                 console.error(`[WORKSTATIONS] Failed to clear finished order ${orderId}:`, err);
             }
