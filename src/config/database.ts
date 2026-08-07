@@ -1,6 +1,7 @@
 import knex, { Knex } from "knex";
 
 let db: Knex | null = null;
+let initPromise: Promise<Knex> | null = null;
 
 export async function insertGetId<T extends Record<string, any>>(
     targetDb: Knex,
@@ -19,20 +20,34 @@ export async function insertGetId<T extends Record<string, any>>(
 export const getDb = async () => {
     if (db) return db;
 
-    db = knex({
-        client: "pg",
-        connection: {
-            host: process.env.PG_HOST || "localhost",
-            port: parseInt(process.env.PG_PORT || "5432", 10),
-            database: process.env.PG_DATABASE || "paperless",
-            user: process.env.PG_USER || "postgres",
-            password: process.env.PG_PASSWORD || "",
-        },
-        pool: { min: 0, max: 10 },
-    });
+    // Multiple callers can race to initialize on startup (index.ts's
+    // initDb() plus pollWorkstations/runArchivalSweep/checkForNewPlan all
+    // call getDb() independently from the listen() callback). Without this
+    // guard, a second caller could see `db` truthy the instant `knex(...)`
+    // is constructed below — before setupDatabase() has actually finished
+    // creating tables — and start querying tables that don't exist yet.
+    // Sharing one in-flight init promise means every concurrent caller
+    // waits for the SAME full setup instead of racing ahead of it.
+    if (!initPromise) {
+        initPromise = (async () => {
+            const instance = knex({
+                client: "pg",
+                connection: {
+                    host: process.env.PG_HOST || "localhost",
+                    port: parseInt(process.env.PG_PORT || "5432", 10),
+                    database: process.env.PG_DATABASE || "paperless",
+                    user: process.env.PG_USER || "postgres",
+                    password: process.env.PG_PASSWORD || "",
+                },
+                pool: { min: 0, max: 10 },
+            });
+            await setupDatabase(instance);
+            db = instance;
+            return instance;
+        })();
+    }
 
-    await setupDatabase(db);
-    return db;
+    return initPromise;
 };
 
 const setupDatabase = async (targetDb: Knex) => {
@@ -95,26 +110,6 @@ const setupDatabase = async (targetDb: Knex) => {
         await targetDb.schema.alterTable("workstations", (table) => {
             table.integer("cycle_index").defaultTo(1);
             table.integer("total_cycles").defaultTo(1);
-        });
-    }
-
-    // 3b. order_cycle_state table — authoritative cycle_index/total_cycles
-    // per order, keyed by order_id. Written unconditionally on every
-    // order-update (see handleOrderUpdate), independent of whether the
-    // separately-polled `workstations` table has caught up to this order
-    // yet. Previously cycle_index/total_cycles were only written by
-    // matching workstations.current_order_id — which is populated on its
-    // own timer by pollWorkstations() — so a webhook arriving before the
-    // next poll would silently fail to update anything (0 rows matched),
-    // leaving stale values from whatever order previously occupied that
-    // station row. Reading cycle progress from here instead removes that
-    // race entirely.
-    if (!(await targetDb.schema.hasTable("order_cycle_state"))) {
-        await targetDb.schema.createTable("order_cycle_state", (table) => {
-            table.string("order_id").primary();
-            table.integer("cycle_index").notNullable().defaultTo(1);
-            table.integer("total_cycles").notNullable().defaultTo(1);
-            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
         });
     }
 
@@ -275,6 +270,51 @@ const setupDatabase = async (targetDb: Knex) => {
             table.string("position").notNullable();
             table.string("employee_name").notNullable();
             table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
+
+    // 14. ptl_prep_queue table — a work queue of items sourced from the
+    // daily productionPlanPTL.json drop (see services/ptlPlanService.ts),
+    // for products that need to be physically prepared BEFORE they ever
+    // reach P2L. One row per (project_number, position, workplace); rows
+    // are upserted on each ingest so a still-pending item just gets its
+    // quantity/date/etc refreshed rather than duplicated. "Done" isn't
+    // tracked here at all — a row counts as done once a matching
+    // order_preparation_log entry exists (see getPrepQueue), reusing the
+    // exact same print-prep-label flow the document viewer already has.
+    if (!(await targetDb.schema.hasTable("ptl_prep_queue"))) {
+        await targetDb.schema.createTable("ptl_prep_queue", (table) => {
+            table.increments("id").primary();
+            table.string("workplace").notNullable();
+            table.string("sales_order");
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.integer("quantity").notNullable().defaultTo(1);
+            table.integer("production_time");
+            // Planned production date, parsed from the source file's
+            // "DD.MM.YYYY" string into a real date so it can be filtered/
+            // sorted properly.
+            table.date("planned_date");
+            table.string("plan_label");
+            table.string("source_file");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+            table.unique(["project_number", "position", "workplace"]);
+        });
+    }
+
+    // 15. ptl_ingest_state table — a single row tracking the last
+    // productionPlanPTL.json file that was actually ingested, so the
+    // periodic checker (and the force-refresh endpoint) can tell "nothing
+    // new" apart from "found a newer file" without re-parsing/re-upserting
+    // on every tick.
+    if (!(await targetDb.schema.hasTable("ptl_ingest_state"))) {
+        await targetDb.schema.createTable("ptl_ingest_state", (table) => {
+            table.integer("id").primary();
+            table.string("last_file_name");
+            table.timestamp("last_ingested_at");
+            table.integer("last_row_count");
+            table.timestamp("last_checked_at");
         });
     }
 };

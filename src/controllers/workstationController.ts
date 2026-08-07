@@ -6,6 +6,8 @@ import {
     importDocument,
     searchPbom,
     listAvailablePbomTypes,
+    parseWorkstationSequence,
+    getInFlightCyclesForOrder,
 } from "../services/workstationService";
 import path from "path";
 import fs from "fs";
@@ -79,7 +81,10 @@ async function resolveDocumentStream(
 // it's in the dedicated current_order_id column or only embedded in the
 // current_order_data JSON blob (see handleOrderUpdate's comment on why
 // both can happen).
-function extractOrderId(ws: { current_order_id: string | null; current_order_data: string | null }): string | null {
+function extractOrderId(ws: {
+    current_order_id: string | null;
+    current_order_data: string | null;
+}): string | null {
     if (ws.current_order_id) return ws.current_order_id;
     if (ws.current_order_data) {
         try {
@@ -97,39 +102,123 @@ export const getWorkstations = async (req: Request, res: Response) => {
         const db = await getDb();
         const workstations = await db("workstations").orderBy("name");
 
-        // Look up cycle_index/total_cycles from order_cycle_state, keyed by
-        // order id, rather than trusting workstations.cycle_index/total_cycles
-        // directly — those columns are only reliable once pollWorkstations()
-        // has caught up to this order, which handleOrderUpdate can't
-        // guarantee (see its comment). order_cycle_state is written
-        // unconditionally on every order-update, so it's always current for
-        // whichever order this row is actually pointing at right now.
-        const orderIds = workstations
-            .map((ws: any) => extractOrderId(ws))
-            .filter((id: string | null): id is string => !!id);
+        // Group currently-occupied stations by the order they're pointing
+        // at, so multiple stations concurrently working the same order
+        // (batch orders) can be resolved together.
+        const occupiedByOrderId = new Map<
+            string,
+            { ws: any; seq: number | null }[]
+        >();
+        for (const ws of workstations) {
+            const orderId = extractOrderId(ws);
+            if (!orderId) continue;
+            const list = occupiedByOrderId.get(orderId) ?? [];
+            list.push({ ws, seq: parseWorkstationSequence(ws.name) });
+            occupiedByOrderId.set(orderId, list);
+        }
 
+        // Per-station cycle_index/total_cycles, keyed by workstations.id.
+        // Filled precisely where possible (see below), falling back to
+        // order_cycle_state's single order-wide value otherwise.
+        const cycleByStationId = new Map<
+            number,
+            { cycle_index: number; total_cycles: number }
+        >();
+
+        // Fallback source: order_cycle_state holds one (monotonically
+        // advancing — see handleOrderUpdate) cycle_index per order_id, used
+        // whenever we can't confidently pair stations to exact cycles.
+        const orderIds = Array.from(occupiedByOrderId.keys());
         const cycleStates = orderIds.length
             ? await db("order_cycle_state").whereIn("order_id", orderIds)
             : [];
-        const cycleByOrderId = new Map(
+        const cycleStateByOrderId = new Map(
             cycleStates.map((row: any) => [row.order_id, row]),
         );
 
-        const result = workstations.map((ws: any) => {
-            const orderId = extractOrderId(ws);
-            const cycleState = orderId ? cycleByOrderId.get(orderId) : undefined;
+        for (const [orderId, occupants] of occupiedByOrderId) {
+            const fallback = cycleStateByOrderId.get(orderId);
 
+            if (occupants.length === 1) {
+                // Unambiguous — but still prefer the exact in-flight value
+                // over the (monotonic-max) order_cycle_state one, since a
+                // single occupant can legitimately be behind the order-wide
+                // max if a newer cycle already started elsewhere and then
+                // finished before this station's poll caught up.
+                const inFlight = await getInFlightCyclesForOrder(orderId);
+                const cycle =
+                    inFlight.length === 1
+                        ? inFlight[0]!
+                        : fallback
+                          ? {
+                                cycleIndex: fallback.cycle_index,
+                                totalCycles: fallback.total_cycles,
+                            }
+                          : { cycleIndex: 1, totalCycles: 1 };
+                cycleByStationId.set(occupants[0]!.ws.id, {
+                    cycle_index: cycle.cycleIndex,
+                    total_cycles: cycle.totalCycles,
+                });
+                continue;
+            }
+
+            // Multiple stations concurrently on the same order. Pair them
+            // up with the order's in-flight cycles by line position: the
+            // station furthest along the line (highest WS_<n>) holds the
+            // oldest in-flight cycle (closest to finishing); the one at the
+            // front (lowest WS_<n>) holds the newest. This only works if
+            // every occupant's name parses as WS_<n> AND the count matches
+            // exactly — otherwise we can't trust the pairing, and fall back
+            // to showing the same order-wide value on all of them (the old
+            // behavior) rather than guess wrong.
+            const inFlight = await getInFlightCyclesForOrder(orderId);
+            const allParsed = occupants.every((o) => o.seq !== null);
+
+            if (allParsed && inFlight.length === occupants.length) {
+                const sortedOccupants = [...occupants].sort(
+                    (a, b) => (a.seq as number) - (b.seq as number),
+                );
+                // inFlight is ascending (oldest/lowest first); reverse so
+                // index 0 = newest, matching sortedOccupants[0] = front of line.
+                const sortedCyclesDesc = [...inFlight].reverse();
+                sortedOccupants.forEach((occupant, i) => {
+                    const cycle = sortedCyclesDesc[i]!;
+                    cycleByStationId.set(occupant.ws.id, {
+                        cycle_index: cycle.cycleIndex,
+                        total_cycles: cycle.totalCycles,
+                    });
+                });
+            } else {
+                console.log(
+                    `[WORKSTATIONS] Can't precisely pair order ${orderId} across ${occupants.length} stations ` +
+                        `(${occupants.map((o) => o.ws.name).join(", ")}) — ` +
+                        (allParsed
+                            ? `found ${inFlight.length} in-flight cycle(s), expected ${occupants.length}`
+                            : `at least one station name doesn't parse as WS_<number>`) +
+                        `; showing the order-wide cycle on all of them`,
+                );
+                const cycle_index = fallback ? fallback.cycle_index : 1;
+                const total_cycles = fallback ? fallback.total_cycles : 1;
+                for (const occupant of occupants) {
+                    cycleByStationId.set(occupant.ws.id, {
+                        cycle_index,
+                        total_cycles,
+                    });
+                }
+            }
+        }
+
+        const result = workstations.map((ws: any) => {
+            const cycle = cycleByStationId.get(ws.id);
             return {
                 ...ws,
                 current_order_data: ws.current_order_data
                     ? JSON.parse(ws.current_order_data)
                     : null,
-                // Fall back to 1/1 (not the workstations row's own stale
-                // columns) when there's no order_cycle_state record yet,
-                // e.g. right after a fresh install or for a station with no
-                // current order.
-                cycle_index: cycleState ? cycleState.cycle_index : 1,
-                total_cycles: cycleState ? cycleState.total_cycles : 1,
+                // Stations with no current order (or that fell through
+                // every lookup above) default to 1/1.
+                cycle_index: cycle ? cycle.cycle_index : 1,
+                total_cycles: cycle ? cycle.total_cycles : 1,
             };
         });
 

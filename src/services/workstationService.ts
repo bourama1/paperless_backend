@@ -80,10 +80,51 @@ export interface OrderUpdate {
  * furthest along the line. Returns null for anything that doesn't match,
  * so callers can fall back to a safer default instead of guessing.
  */
-function parseWorkstationSequence(name: string): number | null {
+export function parseWorkstationSequence(name: string): number | null {
     const match = /^WS_(\d+)$/i.exec(name.trim());
     if (!match) return null;
     return parseInt(match[1]!, 10);
+}
+
+/**
+ * Returns every cycle of an order that has STARTED but not yet FINISHED,
+ * ascending by cycle_index, derived from workstation_log (which records
+ * every event with its exact cycle_index — see handleOrderUpdate).
+ *
+ * STARTED is only ever emitted when a unit enters the first station, and
+ * FINISHED only when it exits the last one (never at the stations in
+ * between). So when N physical stations are concurrently occupied by the
+ * same order, this returns exactly those N cycle numbers: the unit that's
+ * been in the line longest (closest to the last station) has the lowest
+ * in-flight cycle_index, and the one that entered most recently (still at
+ * the first station) has the highest — see resolveStationCycles, which
+ * pairs these up with actual station positions.
+ */
+export async function getInFlightCyclesForOrder(
+    orderId: string,
+): Promise<{ cycleIndex: number; totalCycles: number }[]> {
+    const db = await getDb();
+    const rows: { cycle_index: number; total_cycles: number; action: string }[] =
+        await db("workstation_log")
+            .select("cycle_index", "total_cycles", "action")
+            .where({ order_id: orderId })
+            .orderBy([
+                { column: "created_at", order: "asc" },
+                { column: "id", order: "asc" },
+            ]);
+
+    const inFlight = new Map<number, number>(); // cycle_index -> total_cycles
+    for (const row of rows) {
+        if (row.action === "STARTED") {
+            inFlight.set(row.cycle_index, row.total_cycles);
+        } else if (row.action === "FINISHED") {
+            inFlight.delete(row.cycle_index);
+        }
+    }
+
+    return Array.from(inFlight.entries())
+        .map(([cycleIndex, totalCycles]) => ({ cycleIndex, totalCycles }))
+        .sort((a, b) => a.cycleIndex - b.cycleIndex);
 }
 
 export const pollWorkstations = async () => {

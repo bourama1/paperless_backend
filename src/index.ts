@@ -29,6 +29,7 @@ import queueRoutes from "./routes/queue";
 import filesRoutes from "./routes/files";
 import workstationRoutes from "./routes/workstations";
 import employeesRoutes from "./routes/employees";
+import prepQueueRoutes from "./routes/prepQueue";
 
 const app = express();
 const httpServer = createServer(app);
@@ -94,6 +95,7 @@ app.use("/queue", queueRoutes);
 app.use("/files", filesRoutes);
 app.use("/workstations", workstationRoutes);
 app.use("/employees", employeesRoutes);
+app.use("/prep-queue", prepQueueRoutes);
 app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });
@@ -133,6 +135,18 @@ if (process.env.NODE_ENV !== "test") {
         setInterval(runArchivalSweep, ARCHIVE_POLL_INTERVAL_MS);
         console.log(
             `Retention archival sweep started (interval: ${ARCHIVE_POLL_INTERVAL_MS}ms)`,
+        );
+
+        // Start periodic check for a new productionPlanPTL.json drop
+        // (pre-P2L prep queue — see services/ptlPlanService.ts)
+        const {
+            checkForNewPlan,
+            PTL_PLAN_CHECK_INTERVAL_MS,
+        } = require("./services/ptlPlanService");
+        checkForNewPlan();
+        setInterval(checkForNewPlan, PTL_PLAN_CHECK_INTERVAL_MS);
+        console.log(
+            `PTL production plan check started (interval: ${PTL_PLAN_CHECK_INTERVAL_MS}ms)`,
         );
     });
 }
