@@ -59,17 +59,6 @@
             "detail": "Run all Jest unit/integration tests"
         },
         {
-            "label": "Build backend",
-            "type": "shell",
-            "command": "npm run build",
-            "options": {
-                "cwd": "${workspaceFolder}"
-            },
-            "group": "build",
-            "problemMatcher": [],
-            "detail": "Compile TypeScript to dist/"
-        },
-        {
             "label": "Build EXE",
             "type": "shell",
             "command": "scripts\\build-exe.bat",

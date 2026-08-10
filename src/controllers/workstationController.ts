@@ -81,10 +81,7 @@ async function resolveDocumentStream(
 // it's in the dedicated current_order_id column or only embedded in the
 // current_order_data JSON blob (see handleOrderUpdate's comment on why
 // both can happen).
-function extractOrderId(ws: {
-    current_order_id: string | null;
-    current_order_data: string | null;
-}): string | null {
+function extractOrderId(ws: { current_order_id: string | null; current_order_data: string | null }): string | null {
     if (ws.current_order_id) return ws.current_order_id;
     if (ws.current_order_data) {
         try {
@@ -105,10 +102,7 @@ export const getWorkstations = async (req: Request, res: Response) => {
         // Group currently-occupied stations by the order they're pointing
         // at, so multiple stations concurrently working the same order
         // (batch orders) can be resolved together.
-        const occupiedByOrderId = new Map<
-            string,
-            { ws: any; seq: number | null }[]
-        >();
+        const occupiedByOrderId = new Map<string, { ws: any; seq: number | null }[]>();
         for (const ws of workstations) {
             const orderId = extractOrderId(ws);
             if (!orderId) continue;
@@ -120,10 +114,7 @@ export const getWorkstations = async (req: Request, res: Response) => {
         // Per-station cycle_index/total_cycles, keyed by workstations.id.
         // Filled precisely where possible (see below), falling back to
         // order_cycle_state's single order-wide value otherwise.
-        const cycleByStationId = new Map<
-            number,
-            { cycle_index: number; total_cycles: number }
-        >();
+        const cycleByStationId = new Map<number, { cycle_index: number; total_cycles: number }>();
 
         // Fallback source: order_cycle_state holds one (monotonically
         // advancing — see handleOrderUpdate) cycle_index per order_id, used
@@ -147,14 +138,9 @@ export const getWorkstations = async (req: Request, res: Response) => {
                 // finished before this station's poll caught up.
                 const inFlight = await getInFlightCyclesForOrder(orderId);
                 const cycle =
-                    inFlight.length === 1
-                        ? inFlight[0]!
-                        : fallback
-                          ? {
-                                cycleIndex: fallback.cycle_index,
-                                totalCycles: fallback.total_cycles,
-                            }
-                          : { cycleIndex: 1, totalCycles: 1 };
+                    inFlight.length === 1 ? inFlight[0]!
+                    : fallback ? { cycleIndex: fallback.cycle_index, totalCycles: fallback.total_cycles }
+                    : { cycleIndex: 1, totalCycles: 1 };
                 cycleByStationId.set(occupants[0]!.ws.id, {
                     cycle_index: cycle.cycleIndex,
                     total_cycles: cycle.totalCycles,
@@ -175,9 +161,7 @@ export const getWorkstations = async (req: Request, res: Response) => {
             const allParsed = occupants.every((o) => o.seq !== null);
 
             if (allParsed && inFlight.length === occupants.length) {
-                const sortedOccupants = [...occupants].sort(
-                    (a, b) => (a.seq as number) - (b.seq as number),
-                );
+                const sortedOccupants = [...occupants].sort((a, b) => (a.seq as number) - (b.seq as number));
                 // inFlight is ascending (oldest/lowest first); reverse so
                 // index 0 = newest, matching sortedOccupants[0] = front of line.
                 const sortedCyclesDesc = [...inFlight].reverse();
@@ -200,10 +184,7 @@ export const getWorkstations = async (req: Request, res: Response) => {
                 const cycle_index = fallback ? fallback.cycle_index : 1;
                 const total_cycles = fallback ? fallback.total_cycles : 1;
                 for (const occupant of occupants) {
-                    cycleByStationId.set(occupant.ws.id, {
-                        cycle_index,
-                        total_cycles,
-                    });
+                    cycleByStationId.set(occupant.ws.id, { cycle_index, total_cycles });
                 }
             }
         }
@@ -284,9 +265,13 @@ export const importPbom = async (req: Request, res: Response) => {
         documentType,
     } = req.body;
 
-    if (!projectNumber || !position || !customer) {
+    // customer isn't actually used inside importDocument (kept only for
+    // callers like the search screen that have it handy from a PBOM search
+    // result) — so it's optional here rather than required, since the prep
+    // queue (see ptlPlanService.ts) has no customer field to send.
+    if (!projectNumber || !position) {
         return res.status(400).json({
-            error: "projectNumber, position, and customer are required",
+            error: "projectNumber and position are required",
         });
     }
 

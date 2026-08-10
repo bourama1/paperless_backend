@@ -482,7 +482,11 @@ async function fetchDocumentsByType(
 export interface PbomImportRequest {
     projectNumber: string;
     position: string;
-    customer: string;
+    // Not actually used inside importDocument below — kept optional for
+    // callers that have it handy (e.g. the search screen, from a PBOM
+    // search result), but not required. The prep queue (ptlPlanService.ts)
+    // has no customer field to send.
+    customer?: string;
     productOrder?: string;
     productDesc?: string;
     workplace?: string; // used to pick the right BOM type when documentType isn't given explicitly
