@@ -123,6 +123,37 @@ describe("Workstation Service", () => {
         });
     });
 
+    // order_cycle_state is checked (and upserted) on every handleOrderUpdate
+    // call now — see the monotonic-cycle-tracking comment in the service.
+    // This mock represents "no prior cycle recorded for this order", which
+    // always takes the upsert path.
+    function orderCycleStateTable() {
+        return {
+            where: () => ({ first: () => thenable(null) }),
+            insert: () => ({
+                onConflict: () => ({ merge: () => thenable(undefined) }),
+            }),
+        };
+    }
+
+    // "workstations" is queried two different ways on FINISHED: fetching
+    // matches (by current_order_id / whereRaw on current_order_data), and
+    // updating a specific row by id once a single match is resolved. This
+    // dispatches on the shape of the .where() filter so both work; no
+    // matches means the eager clear is skipped, which is fine for tests
+    // that aren't specifically exercising that logic.
+    function workstationsTable() {
+        return {
+            where: (cond: any) => {
+                if (cond && "id" in cond) {
+                    return { update: () => thenable(undefined) };
+                }
+                return thenable([]); // matchingById — no matches
+            },
+            whereRaw: () => thenable([]), // matchingByJson — no matches
+        };
+    }
+
     describe("handleOrderUpdate", () => {
         it("should log a STARTED action and trigger label printing", async () => {
             const db = jest.fn();
@@ -130,10 +161,11 @@ describe("Workstation Service", () => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
+                if (table === "order_cycle_state") {
+                    return orderCycleStateTable();
+                }
                 if (table === "workstations") {
-                    return {
-                        where: () => ({ update: () => thenable(undefined) }),
-                    };
+                    return workstationsTable();
                 }
                 if (table === "document_print_log") {
                     return {
@@ -162,10 +194,11 @@ describe("Workstation Service", () => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
+                if (table === "order_cycle_state") {
+                    return orderCycleStateTable();
+                }
                 if (table === "workstations") {
-                    return {
-                        where: () => ({ update: () => thenable(undefined) }),
-                    };
+                    return workstationsTable();
                 }
                 if (table === "document_print_log") {
                     return {
@@ -205,10 +238,11 @@ describe("Workstation Service", () => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
+                if (table === "order_cycle_state") {
+                    return orderCycleStateTable();
+                }
                 if (table === "workstations") {
-                    return {
-                        where: () => ({ update: () => thenable(undefined) }),
-                    };
+                    return workstationsTable();
                 }
                 return {};
             });
@@ -238,10 +272,11 @@ describe("Workstation Service", () => {
                 if (table === "workstation_log") {
                     return { insert: () => thenable(undefined) };
                 }
+                if (table === "order_cycle_state") {
+                    return orderCycleStateTable();
+                }
                 if (table === "workstations") {
-                    return {
-                        where: () => ({ update: () => thenable(undefined) }),
-                    };
+                    return workstationsTable();
                 }
                 return {};
             });
@@ -270,20 +305,37 @@ describe("Workstation Service", () => {
             const db = Object.assign(jest.fn(), {
                 fn: { now: jest.fn(() => "CURRENT_TIMESTAMP") },
             });
-            db.mockReturnValueOnce({
-                insert: () => ({ returning: () => [1] }),
-            })
-                .mockReturnValueOnce({ insert: () => thenable(undefined) })
-                .mockReturnValueOnce({
-                    where: () => ({
-                        first: () => thenable({ id: 1, name: "test.pdf" }),
-                    }),
-                })
-                .mockReturnValueOnce({
-                    where: () => ({
-                        orderBy: () => thenable([{ id: 1, version: 1 }]),
-                    }),
-                });
+            // Table-aware rather than positional: importDocument does a
+            // find-or-create (see its comment) — first checks whether a
+            // documents row already exists for this
+            // project/position/documentType, and only inserts if not. This
+            // exercises the "doesn't exist yet" (create) path.
+            db.mockImplementation((table: string) => {
+                if (table === "documents") {
+                    return {
+                        where: (cond: any) => {
+                            if (cond && "id" in cond) {
+                                return {
+                                    first: () =>
+                                        thenable({ id: 1, name: "test.pdf" }),
+                                };
+                            }
+                            // initial find-check — nothing exists yet
+                            return { first: () => thenable(null) };
+                        },
+                        insert: () => ({ returning: () => [1] }),
+                    };
+                }
+                if (table === "revisions") {
+                    return {
+                        insert: () => thenable(undefined),
+                        where: () => ({
+                            orderBy: () => thenable([{ id: 1, version: 1 }]),
+                        }),
+                    };
+                }
+                return {};
+            });
             (getDb as jest.Mock).mockResolvedValue(db);
 
             const result = await importDocument({

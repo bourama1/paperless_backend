@@ -1,6 +1,5 @@
 process.env.ARCHIVE_SHARE_PATH = "/tmp/test-archive-share";
 process.env.ARCHIVE_RETENTION_DAYS = "7";
-process.env.ARCHIVE_DOCUMENT_TYPES = "14,4";
 process.env.ARCHIVE_MAX_ATTEMPTS = "3";
 
 jest.mock("../../config/database");
@@ -42,6 +41,18 @@ function makeArchiveLogQuery(rows: any[]) {
     };
 }
 
+// getPbomTypesForOrder derives which PBOM(s) to archive from the distinct
+// real workplaces (e.g. "Hardware", "Motor") this order was seen at in
+// workstation_log — resolved through the real (unmocked)
+// resolvePbomTypeForWorkplace, not a fixed type list anymore.
+function makeWorkstationLogQuery(workplaces: string[]) {
+    return {
+        distinct: () => ({
+            where: () => thenable(workplaces.map((w) => ({ workstation_name: w }))),
+        }),
+    };
+}
+
 describe("archivalService", () => {
     beforeEach(() => {
         jest.clearAllMocks();
@@ -65,7 +76,7 @@ describe("archivalService", () => {
         expect(convertToPdfA).not.toHaveBeenCalled();
     });
 
-    it("fetches each configured document type, converts to PDF/A, and marks the order archived", async () => {
+    it("resolves the order's actual PBOM type(s) from workstation_log and archives them", async () => {
         const row = {
             id: 1,
             order_id: "order-1",
@@ -82,6 +93,11 @@ describe("archivalService", () => {
                         ...makeArchiveLogQuery([row]),
                         where: () => ({ update: updateFn }),
                     };
+                }
+                if (table === "workstation_log") {
+                    // This order was seen at both Hardware and Motor —
+                    // resolves to two distinct PBOM types (14 and 15).
+                    return makeWorkstationLogQuery(["Hardware", "Motor"]);
                 }
                 return {};
             }),
@@ -100,7 +116,7 @@ describe("archivalService", () => {
 
         await runArchivalSweep();
 
-        // ARCHIVE_DOCUMENT_TYPES = "14,4" -> 2 fetches, 2 conversions
+        // Hardware + Motor -> PBOM_HARDWARE + PBOM_MOTOR -> 2 fetches, 2 conversions
         expect(axios.get).toHaveBeenCalledTimes(2);
         expect(convertToPdfA).toHaveBeenCalledTimes(2);
         expect(updateFn).toHaveBeenCalledWith(
@@ -125,6 +141,9 @@ describe("archivalService", () => {
                         ...makeArchiveLogQuery([row]),
                         where: () => ({ update: updateFn }),
                     };
+                }
+                if (table === "workstation_log") {
+                    return makeWorkstationLogQuery(["Hardware", "Motor"]);
                 }
                 return {};
             }),
@@ -172,6 +191,12 @@ describe("archivalService", () => {
                         ...makeArchiveLogQuery([row]),
                         where: () => ({ update: updateFn }),
                     };
+                }
+                if (table === "workstation_log") {
+                    // No workplace history on record for this order —
+                    // getPbomTypesForOrder falls back to PBOM_HARDWARE, so
+                    // one fetch is still attempted (and fails, below).
+                    return makeWorkstationLogQuery([]);
                 }
                 return {};
             }),

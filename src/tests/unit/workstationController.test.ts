@@ -40,6 +40,7 @@ import {
     handleOrderUpdate,
     importDocument,
     searchPbom,
+    getInFlightCyclesForOrder,
 } from "../../services/workstationService";
 import axios from "axios";
 import fs from "fs";
@@ -84,8 +85,19 @@ describe("Workstation Controller", () => {
             ];
 
             const db = jest.fn();
-            db.mockReturnValue({ orderBy: () => thenable(mockWorkstations) });
+            db.mockImplementation((table: string) => {
+                if (table === "workstations")
+                    return { orderBy: () => thenable(mockWorkstations) };
+                if (table === "order_cycle_state")
+                    return { whereIn: () => thenable([]) };
+                return {};
+            });
             (getDb as jest.Mock).mockResolvedValue(db);
+            // WS1 is the only occupied station (unambiguous match), and has
+            // no in-flight cycles on record — getWorkstations falls back to
+            // the 1/1 default, same as a station with no order_cycle_state
+            // row at all yet.
+            (getInFlightCyclesForOrder as jest.Mock).mockResolvedValue([]);
 
             await getWorkstations(
                 mockRequest as Request,
@@ -99,12 +111,16 @@ describe("Workstation Controller", () => {
                     name: "WS1",
                     current_order_id: "ord1",
                     current_order_data: { _id: "ord1" },
+                    cycle_index: 1,
+                    total_cycles: 1,
                 },
                 {
                     id: 2,
                     name: "WS2",
                     current_order_id: null,
                     current_order_data: null,
+                    cycle_index: 1,
+                    total_cycles: 1,
                 },
             ]);
         });
@@ -256,7 +272,7 @@ describe("Workstation Controller", () => {
 
             expect(mockStatus).toHaveBeenCalledWith(400);
             expect(mockJson).toHaveBeenCalledWith({
-                error: "projectNumber, position, and customer are required",
+                error: "projectNumber and position are required",
             });
         });
 

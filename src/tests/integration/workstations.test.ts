@@ -14,6 +14,7 @@ import {
     handleOrderUpdate,
     importDocument,
     searchPbom,
+    getInFlightCyclesForOrder,
 } from "../../services/workstationService";
 
 jest.mock("../../config/database");
@@ -47,13 +48,24 @@ describe("Workstation API Integration", () => {
                 },
             ];
             const db = jest.fn();
-            db.mockReturnValue({ orderBy: () => thenable(mockWorkstations) });
+            db.mockImplementation((table: string) => {
+                if (table === "workstations")
+                    return { orderBy: () => thenable(mockWorkstations) };
+                if (table === "order_cycle_state")
+                    return { whereIn: () => thenable([]) };
+                return {};
+            });
             (getDb as jest.Mock).mockResolvedValue(db);
+            (getInFlightCyclesForOrder as jest.Mock).mockResolvedValue([]);
 
             const response = await request(app).get("/workstations");
 
             expect(response.status).toBe(200);
-            expect(response.body).toEqual(mockWorkstations);
+            // WS1 has no current order, so it gets the 1/1 default cycle
+            // fields getWorkstations now always includes.
+            expect(response.body).toEqual([
+                { ...mockWorkstations[0], cycle_index: 1, total_cycles: 1 },
+            ]);
         });
     });
 
@@ -140,7 +152,7 @@ describe("Workstation API Integration", () => {
 
             expect(response.status).toBe(400);
             expect(response.body).toEqual({
-                error: "projectNumber, position, and customer are required",
+                error: "projectNumber and position are required",
             });
         });
     });

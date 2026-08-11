@@ -7,8 +7,11 @@ const sampleCountryCodes = JSON.stringify({
 
 // Mirrors the real config/label-type-config.json shape, with entries for the
 // two label types used in sampleCsvContent below: "section" (door-leaf/wing
-// group) and "motor" (hardware/motor group) — so tests exercise the real
-// workplace → scan-prefix → parametry matching path instead of an empty config.
+// group) and "t01_hw_kr" (hardware/motor group's Hardware-specific subset —
+// see WORKPLACE_TYPE_FILTER, which splits that shared scan-prefix group by
+// "_hw_kr" suffix between the Hardware and Motor workplaces) — so tests
+// exercise the real workplace → scan-prefix → parametry matching path
+// instead of an empty config.
 const sampleParametryConfig = JSON.stringify([
     {
         scanB: "KM-SVK ",
@@ -23,7 +26,7 @@ const sampleParametryConfig = JSON.stringify([
     {
         scanB: "KM-SVM ",
         scanC: 'K"žSV" ',
-        type: "motor",
+        type: "t01_hw_kr",
         printPrimary: "Ano",
         printSecondary: "Ne",
         copies: 1,
@@ -121,7 +124,7 @@ const mockOrderUpdate: OrderUpdate = {
 
 const sampleCsvContent = [
     'section;"Customer";"SO-001";"Part1";"1/4";"01";"123456";"789012";"PO-001";"001234";"R1";"Germ.","0.5";"TMP123.TXT";;"Delivery GmbH";"Main St 1";"12345";"Germ."',
-    'motor;"Customer";"SO-001";"Part2";"2/4";"01";"123457";"789013";"PO-001";"001235";"R1";"Germ.";"1.0";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
+    't01_hw_kr;"Customer";"SO-001";"Part2";"2/4";"01";"123457";"789013";"PO-001";"001235";"R1";"Germ.";"1.0";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
 ].join("\n");
 
 describe("Label Printing Service", () => {
