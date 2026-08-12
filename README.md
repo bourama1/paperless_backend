@@ -163,6 +163,6 @@ API:
   `/workstations/documents/:id/render`, and save annotated revisions via
   `/workstations/save-edited`.
 
-See the [mobile repo's README](https://github.com/bourama1/paperless_mobile/README.md) for the client-side
+See the [mobile repo's README](https://github.com/bourama1/paperless_mobile/blob/main/README.md) for the client-side
 details. In short: **this backend is the single source of truth and event
 bus; the mobile app is a thin, mostly stateless UI over it.**
