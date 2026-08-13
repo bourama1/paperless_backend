@@ -41,8 +41,13 @@ describe("Files Controller", () => {
     });
 
     describe("getDocumentsOverview", () => {
-        // Chain resolves at .orderBy(), matching how the real query is
-        // awaited in the controller (`await query.orderBy(...)`).
+        // Chain resolves whenever awaited — matching real knex query
+        // builders, which are thenable at any point in the chain (not just
+        // after one specific terminal method). Different queries in the
+        // controller terminate the chain at different points (.orderBy()
+        // for the main overview query, .groupBy() for the check-status
+        // aggregates), so this needs to work regardless of which method
+        // was called last.
         function chainable(resolveValue: any) {
             const chain: any = {};
             for (const m of [
@@ -52,12 +57,14 @@ describe("Files Controller", () => {
                 "whereIn",
                 "select",
                 "max",
+                "countDistinct",
                 "groupBy",
             ]) {
                 chain[m] = jest.fn().mockReturnValue(chain);
             }
             chain.as = jest.fn().mockReturnValue("subquery");
             chain.orderBy = jest.fn().mockResolvedValue(resolveValue);
+            chain.then = (resolve: any) => resolve(resolveValue);
             return chain;
         }
 
@@ -148,6 +155,14 @@ describe("Files Controller", () => {
                                 is_edited: false,
                             },
                         ],
+                        // No order_cycle_checks/order_completion_log/
+                        // order_preparation_log/ptl_prep_queue rows in this
+                        // mock -> getCheckStatusForPositions falls back to
+                        // its defaults (1 cycle, none checked).
+                        checked: false,
+                        checked_cycles: 0,
+                        total_cycles: 1,
+                        unchecked_cycles: [1],
                     },
                     {
                         document_id: 2,
@@ -160,6 +175,10 @@ describe("Files Controller", () => {
                         status: null,
                         revisioned: false,
                         revisions: [],
+                        checked: false,
+                        checked_cycles: 0,
+                        total_cycles: 1,
+                        unchecked_cycles: [1],
                     },
                 ],
             });
@@ -238,6 +257,199 @@ describe("Files Controller", () => {
             const result = mockJson.mock.calls[0][0];
             expect(result.items).toHaveLength(1);
             expect(result.items[0].document_id).toBe(1);
+        });
+
+        it("should compute checked/checked_cycles/total_cycles from order_cycle_checks, preferring order_completion_log for total_cycles", async () => {
+            mockRequest = { query: {} };
+
+            const mockDocRows = [
+                {
+                    document_id: 1,
+                    document_name: "doc1.pdf",
+                    project_number: "P1",
+                    position: "10",
+                    document_type: 14,
+                    created_at: "t",
+                    updated_at: "t",
+                    latest_status: "complete",
+                },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "revisions") return chainable([]);
+                if (table === "order_completion_log") {
+                    // Real P2L cycle data says this position has 3 cycles —
+                    // takes priority over order_preparation_log/ptl_prep_queue.
+                    return chainable([
+                        { project_number: "P1", position: "10", max_total_cycles: 3 },
+                    ]);
+                }
+                if (table === "order_preparation_log") {
+                    return chainable([
+                        { project_number: "P1", position: "10", max_total_cycles: 1 },
+                    ]);
+                }
+                if (table === "order_cycle_checks") {
+                    // Only 2 of the 3 cycles have an "ok" check on record —
+                    // now returning raw rows (query fetches everything and
+                    // groups/reduces to "latest per cycle" in JS).
+                    return chainable([
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            cycle_index: 1,
+                            status: "ok",
+                            employee_name: "Jan Novak",
+                            note: null,
+                            created_at: "2026-07-17T09:00:00Z",
+                        },
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            cycle_index: 2,
+                            status: "ok",
+                            employee_name: "Jan Novak",
+                            note: null,
+                            created_at: "2026-07-17T09:05:00Z",
+                        },
+                    ]);
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items[0]).toMatchObject({
+                total_cycles: 3,
+                checked_cycles: 2,
+                checked: false, // 2 of 3 checked -> not fully checked yet
+                unchecked_cycles: [3],
+            });
+        });
+
+        it("should filter to only unchecked documents when unchecked=true", async () => {
+            mockRequest = { query: { unchecked: "true" } };
+
+            const mockDocRows = [
+                {
+                    document_id: 1,
+                    document_name: "doc1.pdf",
+                    project_number: "P1",
+                    position: "10",
+                    document_type: 14,
+                    created_at: "t",
+                    updated_at: "t",
+                    latest_status: null,
+                },
+                {
+                    document_id: 2,
+                    document_name: "doc2.pdf",
+                    project_number: "P2",
+                    position: "20",
+                    document_type: 4,
+                    created_at: "t",
+                    updated_at: "t",
+                    latest_status: null,
+                },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "revisions") return chainable([]);
+                if (table === "order_cycle_checks") {
+                    // P1/10 fully checked (1/1 default cycle); P2/20 not checked at all.
+                    return chainable([
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            cycle_index: 1,
+                            status: "ok",
+                            employee_name: "Jan Novak",
+                            note: null,
+                            created_at: "2026-07-17T09:00:00Z",
+                        },
+                    ]);
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items).toHaveLength(1);
+            expect(result.items[0].document_id).toBe(2);
+            expect(result.items[0].checked).toBe(false);
+        });
+
+        it("does not count a cycle as checked if its latest row is 'issue', even if an older row was 'ok'", async () => {
+            mockRequest = { query: {} };
+
+            const mockDocRows = [
+                {
+                    document_id: 1,
+                    document_name: "doc1.pdf",
+                    project_number: "P1",
+                    position: "10",
+                    document_type: 14,
+                    created_at: "t",
+                    updated_at: "t",
+                    latest_status: null,
+                },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "revisions") return chainable([]);
+                if (table === "order_cycle_checks") {
+                    // Rows are returned newest-first (matches the real
+                    // .orderBy("created_at", "desc")) — the later "issue"
+                    // row for cycle 1 must win over the earlier "ok" one.
+                    return chainable([
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            cycle_index: 1,
+                            status: "issue",
+                            employee_name: "Petr Svoboda",
+                            note: "Missing bracket",
+                            created_at: "2026-07-17T10:00:00Z",
+                        },
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            cycle_index: 1,
+                            status: "ok",
+                            employee_name: "Jan Novak",
+                            note: null,
+                            created_at: "2026-07-17T09:00:00Z",
+                        },
+                    ]);
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items[0]).toMatchObject({
+                checked: false,
+                checked_cycles: 0,
+                unchecked_cycles: [1],
+            });
         });
     });
 

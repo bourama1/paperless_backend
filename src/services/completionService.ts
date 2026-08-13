@@ -139,17 +139,62 @@ export const recordOrderCompletion = async (
 
 /**
  * Records who prepared a Hardware order's externally-sourced items at the
- * prep station. Called alongside labelPrintingService.printPrepLabel.
+ * prep station — one row per box/cycle (see buildPrepLabelPdf, which prints
+ * one label per cycle for a batch order), not one row for the whole
+ * project/position. Called alongside labelPrintingService.printPrepLabel.
  */
 export const recordOrderPreparation = async (
     projectNumber: string,
     position: string,
     employeeName: string,
+    totalCycles: number = 1,
 ): Promise<void> => {
     const db = await getDb();
-    await db("order_preparation_log").insert({
+    const count = Math.max(1, totalCycles);
+    const rows = Array.from({ length: count }, (_, i) => ({
         project_number: projectNumber,
         position,
         employee_name: employeeName,
+        cycle_index: i + 1,
+        total_cycles: count,
+    }));
+    await db("order_preparation_log").insert(rows);
+};
+
+export const ORDER_CHECK_STATUSES = ["ok", "issue"] as const;
+export type OrderCheckStatus = (typeof ORDER_CHECK_STATUSES)[number];
+
+export function isValidCheckStatus(status: string): status is OrderCheckStatus {
+    return (ORDER_CHECK_STATUSES as readonly string[]).includes(status);
+}
+
+export interface OrderCheckInput {
+    projectNumber: string;
+    position: string;
+    cycleIndex: number;
+    totalCycles: number;
+    employeeName: string;
+    status: OrderCheckStatus;
+    note?: string;
+}
+
+/**
+ * Records the third and final role on a cycle — after who prepared it
+ * (order_preparation_log) and who ran it (order_completion_log), who
+ * checked it's actually correct. A cycle can be checked more than once
+ * (e.g. re-verifying after fixing an issue); getCheckStatusForPositions
+ * (filesController.ts) reads whichever cycles have at least one "ok" row
+ * as checked.
+ */
+export const recordOrderCheck = async (input: OrderCheckInput): Promise<void> => {
+    const db = await getDb();
+    await db("order_cycle_checks").insert({
+        project_number: input.projectNumber,
+        position: input.position,
+        cycle_index: input.cycleIndex,
+        total_cycles: input.totalCycles,
+        employee_name: input.employeeName,
+        status: input.status,
+        note: input.note || null,
     });
 };

@@ -113,6 +113,26 @@ const setupDatabase = async (targetDb: Knex) => {
         });
     }
 
+    // 3b. order_cycle_state table — authoritative cycle_index/total_cycles
+    // per order, keyed by order_id. Written unconditionally on every
+    // order-update (see handleOrderUpdate), independent of whether the
+    // separately-polled `workstations` table has caught up to this order
+    // yet. Previously cycle_index/total_cycles were only written by
+    // matching workstations.current_order_id — which is populated on its
+    // own timer by pollWorkstations() — so a webhook arriving before the
+    // next poll would silently fail to update anything (0 rows matched),
+    // leaving stale values from whatever order previously occupied that
+    // station row. Reading cycle progress from here instead removes that
+    // race entirely.
+    if (!(await targetDb.schema.hasTable("order_cycle_state"))) {
+        await targetDb.schema.createTable("order_cycle_state", (table) => {
+            table.string("order_id").primary();
+            table.integer("cycle_index").notNullable().defaultTo(1);
+            table.integer("total_cycles").notNullable().defaultTo(1);
+            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+        });
+    }
+
     // 4. workstation_log table
     if (!(await targetDb.schema.hasTable("workstation_log"))) {
         await targetDb.schema.createTable("workstation_log", (table) => {
@@ -273,6 +293,21 @@ const setupDatabase = async (targetDb: Knex) => {
         });
     }
 
+    // A batch order prints one label per box/cycle (see buildPrepLabelPdf
+    // and createPrepLabel) rather than one label for the whole
+    // project/position — so preparation needs to be recorded per cycle too,
+    // not just per project/position. Added via alterTable (not baked into
+    // createTable above) so existing deployments pick this up without
+    // losing prior rows. cycle_index/total_cycles default to 1 so old rows
+    // (recorded before this column existed, when every order effectively
+    // had a single implicit cycle) read back consistently.
+    if (!(await targetDb.schema.hasColumn("order_preparation_log", "cycle_index"))) {
+        await targetDb.schema.alterTable("order_preparation_log", (table) => {
+            table.integer("cycle_index").notNullable().defaultTo(1);
+            table.integer("total_cycles").notNullable().defaultTo(1);
+        });
+    }
+
     // 14. ptl_prep_queue table — a work queue of items sourced from the
     // daily productionPlanPTL.json drop (see services/ptlPlanService.ts),
     // for products that need to be physically prepared BEFORE they ever
@@ -315,6 +350,30 @@ const setupDatabase = async (targetDb: Knex) => {
             table.timestamp("last_ingested_at");
             table.integer("last_row_count");
             table.timestamp("last_checked_at");
+        });
+    }
+
+    // 16. order_cycle_checks table — the quality-check workflow. Every
+    // cycle of an order/position now has three people on record:
+    //   - who prepared it        -> order_preparation_log (cycle_index)
+    //   - who ran the cycle      -> order_completion_log (cycle_index)
+    //   - who checked it's OK    -> order_cycle_checks (this table)
+    // One row per (project_number, position, cycle_index) check — a cycle
+    // can be re-checked (e.g. re-verifying after a fix), so this isn't
+    // unique-constrained; getCycleCheckStatus (documentsService-side) reads
+    // the latest row per cycle. status is "ok" or "issue", with an optional
+    // free-text note for what was wrong.
+    if (!(await targetDb.schema.hasTable("order_cycle_checks"))) {
+        await targetDb.schema.createTable("order_cycle_checks", (table) => {
+            table.increments("id").primary();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.integer("cycle_index").notNullable().defaultTo(1);
+            table.integer("total_cycles").notNullable().defaultTo(1);
+            table.string("employee_name").notNullable();
+            table.string("status").notNullable().defaultTo("ok"); // "ok" | "issue"
+            table.text("note");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
         });
     }
 };

@@ -312,8 +312,11 @@ function escapePdfText(s: string): string {
 }
 
 /**
- * Builds a one-page A4 PDF identifying an order/position and who prepared
- * it, with a timestamp. Uses WinAnsiEncoding so common accented Latin
+ * Builds an A4 PDF identifying an order/position and who prepared it, with
+ * a timestamp — one page per cycle (box) when totalCycles > 1, each
+ * labeled "cycleIndex/totalCycles" so a batch of physical boxes for the
+ * same order/position/project can be told apart. totalCycles defaults to 1
+ * for a single-box order. Uses WinAnsiEncoding so common accented Latin
  * characters (á, é, í, ó, ú, ý, ...) render correctly — NOTE: Czech-specific
  * letters not present in WinAnsi (č, ř, š, ž, ě, ď, ť, ň) will not render
  * correctly with this base font; a real Czech name may show those letters
@@ -325,6 +328,7 @@ export function buildPrepLabelPdf(
     projectNumber: string,
     position: string,
     employeeName: string,
+    totalCycles: number = 1,
 ): Buffer {
     const now = new Date();
     const dateStr = now.toLocaleDateString("cs-CZ");
@@ -335,34 +339,68 @@ export function buildPrepLabelPdf(
 
     const pageWidth = 595.28; // A4, points
     const pageHeight = 841.89;
+    const pageCount = Math.max(1, totalCycles);
 
-    const lines: { text: string; size: number; y: number }[] = [
-        { text: "OBJEDNAVKA", size: 20, y: pageHeight - 120 },
-        { text: projectNumber, size: 48, y: pageHeight - 175 },
-        { text: "POZICE", size: 20, y: pageHeight - 260 },
-        { text: position, size: 48, y: pageHeight - 315 },
-        { text: `Pripravil: ${employeeName}`, size: 16, y: pageHeight - 380 },
-        { text: `${dateStr} ${timeStr}`, size: 12, y: pageHeight - 405 },
-    ];
+    function pageContentOps(cycleIndex: number): string {
+        const lines: { text: string; size: number; y: number }[] = [
+            { text: "OBJEDNAVKA", size: 20, y: pageHeight - 120 },
+            { text: projectNumber, size: 48, y: pageHeight - 175 },
+            { text: "POZICE", size: 20, y: pageHeight - 260 },
+            { text: position, size: 48, y: pageHeight - 315 },
+            { text: `Pripravil: ${employeeName}`, size: 16, y: pageHeight - 380 },
+            { text: `${dateStr} ${timeStr}`, size: 12, y: pageHeight - 405 },
+        ];
+        // Only show the cycle/box counter when there's more than one box —
+        // a single-box order's label stays exactly as it was before.
+        if (pageCount > 1) {
+            lines.push(
+                { text: "BALENI", size: 20, y: pageHeight - 460 },
+                { text: `${cycleIndex}/${pageCount}`, size: 36, y: pageHeight - 505 },
+            );
+        }
+        return lines
+            .map(
+                (l) =>
+                    `BT /F1 ${l.size} Tf 60 ${l.y.toFixed(2)} Td (${escapePdfText(l.text)}) Tj ET`,
+            )
+            .join("\n");
+    }
 
-    const textOps = lines
-        .map(
-            (l) =>
-                `BT /F1 ${l.size} Tf 60 ${l.y.toFixed(2)} Td (${escapePdfText(l.text)}) Tj ET`,
-        )
-        .join("\n");
+    // Object layout: 1 = Catalog, 2 = Pages, 3..3+N-1 = Page objects,
+    // 3+N..3+2N-1 = per-page Content streams, 3+2N = shared Font. Kept
+    // dynamic (not hardcoded object numbers) so this generalizes cleanly
+    // from the original fixed 5-object single-page layout to N pages.
+    const pageObjBase = 3;
+    const contentObjBase = pageObjBase + pageCount;
+    const fontObjNum = contentObjBase + pageCount;
+
+    const pageKids = Array.from(
+        { length: pageCount },
+        (_, i) => `${pageObjBase + i} 0 R`,
+    ).join(" ");
 
     const objects: string[] = [];
-    objects.push("<< /Type /Catalog /Pages 2 0 R >>"); // 1
-    objects.push("<< /Type /Pages /Kids [3 0 R] /Count 1 >>"); // 2
+    objects.push(`<< /Type /Catalog /Pages 2 0 R >>`); // 1
     objects.push(
-        `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
-            `/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>`,
-    ); // 3
-    objects.push(`<< /Length ${textOps.length} >>\nstream\n${textOps}\nendstream`); // 4
+        `<< /Type /Pages /Kids [${pageKids}] /Count ${pageCount} >>`,
+    ); // 2
+
+    for (let i = 0; i < pageCount; i++) {
+        const contentObjNum = contentObjBase + i;
+        objects.push(
+            `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
+                `/Resources << /Font << /F1 ${fontObjNum} 0 R >> >> /Contents ${contentObjNum} 0 R >>`,
+        ); // pageObjBase + i
+    }
+
+    for (let i = 0; i < pageCount; i++) {
+        const textOps = pageContentOps(i + 1);
+        objects.push(`<< /Length ${textOps.length} >>\nstream\n${textOps}\nendstream`); // contentObjBase + i
+    }
+
     objects.push(
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-    ); // 5
+    ); // fontObjNum
 
     const chunks: Buffer[] = [];
     const offsets: number[] = [0];

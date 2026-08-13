@@ -13,6 +13,7 @@ import {
 import {
     createOrderCompletion,
     createPrepLabel,
+    createOrderCheck,
 } from "../controllers/completionController";
 
 const router = Router();
@@ -26,6 +27,7 @@ router.get("/search-pbom", searchPbomHandler);
 router.get("/pbom-types", listPbomTypesHandler);
 router.post("/order-completion", createOrderCompletion);
 router.post("/print-prep-label", createPrepLabel);
+router.post("/order-check", createOrderCheck);
 router.post("/save-edited", saveEdited);
 router.get("/documents/:id/render", renderDocument);
 
