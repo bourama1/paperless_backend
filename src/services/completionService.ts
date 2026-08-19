@@ -23,11 +23,23 @@ export interface Employee {
 
 export const ORDER_COMPLETION_STATUSES = [
     "complete",
+    // Same as "complete" in every way (archival, counting toward
+    // completedCycles, etc.) — the distinction exists purely so someone
+    // reviewing completed orders can tell which ones need their changes
+    // manually entered into the ERP system afterwards.
+    "complete_with_changes",
     "missing_product",
     "shipped_incomplete",
 ] as const;
 
 export type OrderCompletionStatus = (typeof ORDER_COMPLETION_STATUSES)[number];
+
+// Statuses that count as "this cycle is done" for archival purposes — see
+// recordOrderCompletion below.
+const COMPLETE_LIKE_STATUSES: readonly OrderCompletionStatus[] = [
+    "complete",
+    "complete_with_changes",
+];
 
 export function isValidCompletionStatus(
     status: string,
@@ -84,12 +96,13 @@ export const recordOrderCompletion = async (
         status: input.status,
     });
 
-    // Archival (see archivalService.ts) is driven by this "Complete" tag,
-    // not by FINISHED anymore — reusing ARCHIVE_RETENTION_DAYS, but the
-    // countdown now only starts once EVERY cycle of the order has been
-    // tagged Complete, not just whichever cycle happens to be tagged most
-    // recently (an order isn't done just because door 1 of 6 is done).
-    if (input.status === "complete") {
+    // Archival (see archivalService.ts) is driven by this "Complete" tag
+    // (either flavor — see COMPLETE_LIKE_STATUSES), not by FINISHED
+    // anymore — reusing ARCHIVE_RETENTION_DAYS, but the countdown now only
+    // starts once EVERY cycle of the order has been tagged Complete, not
+    // just whichever cycle happens to be tagged most recently (an order
+    // isn't done just because door 1 of 6 is done).
+    if (COMPLETE_LIKE_STATUSES.includes(input.status)) {
         if (!input.projectNumber || !input.position) {
             console.log(
                 `[ARCHIVE] Order ${input.orderId} tagged Complete with no projectNumber/position — skipping archival queue`,
@@ -99,7 +112,8 @@ export const recordOrderCompletion = async (
 
         const totalCycles = input.totalCycles ?? 1;
         const completedResult = await db("order_completion_log")
-            .where({ order_id: input.orderId, status: "complete" })
+            .where({ order_id: input.orderId })
+            .whereIn("status", COMPLETE_LIKE_STATUSES)
             .countDistinct("cycle_index as count")
             .first();
         const completedCycles = Number(completedResult?.count) || 0;

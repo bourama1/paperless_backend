@@ -55,7 +55,7 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
     }
     if (!isValidCompletionStatus(status)) {
         return res.status(400).json({
-            error: "status must be one of: complete, missing_product, shipped_incomplete",
+            error: "status must be one of: complete, complete_with_changes, missing_product, shipped_incomplete",
         });
     }
 
