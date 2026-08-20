@@ -17,7 +17,10 @@ jest.mock("../../services/pdfaService", () => ({
     PdfaConversionError: class PdfaConversionError extends Error {},
 }));
 
-import { getDocumentsOverview, exportPdfa } from "../../controllers/filesController";
+import {
+    getDocumentsOverview,
+    exportPdfa,
+} from "../../controllers/filesController";
 import { getDb } from "../../config/database";
 import { Request, Response } from "express";
 import fs from "fs";
@@ -53,6 +56,7 @@ describe("Files Controller", () => {
             for (const m of [
                 "leftJoin",
                 "whereNull",
+                "whereNotNull",
                 "where",
                 "whereIn",
                 "select",
@@ -90,7 +94,10 @@ describe("Files Controller", () => {
                     document_type: 4,
                     created_at: "2026-07-17T12:00:00Z",
                     updated_at: "2026-07-17T12:00:00Z",
-                    latest_status: null,
+                    // Not null — the query's whereNotNull("ocl.status")
+                    // means a real result row here always has a status;
+                    // see the two tests below for that filtering itself.
+                    latest_status: "missing_product",
                 },
             ];
             // Pre-sorted version desc, matching the real ORDER BY version desc clause.
@@ -172,7 +179,7 @@ describe("Files Controller", () => {
                         document_type: 4,
                         created_at: "2026-07-17T12:00:00Z",
                         updated_at: "2026-07-17T12:00:00Z",
-                        status: null,
+                        status: "missing_product",
                         revisioned: false,
                         revisions: [],
                         checked: false,
@@ -195,6 +202,67 @@ describe("Files Controller", () => {
             );
 
             expect(mockJson).toHaveBeenCalledWith({ items: [] });
+        });
+
+        it("always excludes documents with no completion status recorded, even with no status filter applied", async () => {
+            mockRequest = { query: {} };
+
+            let capturedWhereNotNullArg: string | undefined;
+            const db = jest.fn((table: string) => {
+                if (table === "documents as d") {
+                    const chain = chainable([]);
+                    // Wrap whereNotNull to capture what it was called with,
+                    // while still behaving like the rest of the chain.
+                    const original = chain.whereNotNull;
+                    chain.whereNotNull = jest.fn((arg: string) => {
+                        capturedWhereNotNullArg = arg;
+                        return original(arg);
+                    });
+                    return chain;
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            expect(capturedWhereNotNullArg).toBe("ocl.status");
+        });
+
+        it("filters by status via whereIn when a status query param is given", async () => {
+            mockRequest = {
+                query: { status: "complete,complete_with_changes" },
+            };
+
+            let capturedWhereInArgs: [string, string[]] | undefined;
+            const db = jest.fn((table: string) => {
+                if (table === "documents as d") {
+                    const chain = chainable([]);
+                    const original = chain.whereIn;
+                    chain.whereIn = jest.fn(
+                        (column: string, values: string[]) => {
+                            capturedWhereInArgs = [column, values];
+                            return original(column, values);
+                        },
+                    );
+                    return chain;
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            expect(capturedWhereInArgs).toEqual([
+                "ocl.status",
+                ["complete", "complete_with_changes"],
+            ]);
         });
 
         it("should filter to only revisioned documents when revisioned=true", async () => {
@@ -282,12 +350,20 @@ describe("Files Controller", () => {
                     // Real P2L cycle data says this position has 3 cycles —
                     // takes priority over order_preparation_log/ptl_prep_queue.
                     return chainable([
-                        { project_number: "P1", position: "10", max_total_cycles: 3 },
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            max_total_cycles: 3,
+                        },
                     ]);
                 }
                 if (table === "order_preparation_log") {
                     return chainable([
-                        { project_number: "P1", position: "10", max_total_cycles: 1 },
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            max_total_cycles: 1,
+                        },
                     ]);
                 }
                 if (table === "order_cycle_checks") {

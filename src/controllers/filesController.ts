@@ -242,18 +242,21 @@ export const getDocumentById = async (req: Request, res: Response) => {
  * Returns every document imported through the app that hasn't been
  * archived yet (see archivalService.ts), each annotated with:
  *   - status: the most recent kiosk completion status for its
- *     projectNumber/position ("complete" | "missing_product" |
- *     "shipped_incomplete" | null if never confirmed)
+ *     projectNumber/position ("complete" | "complete_with_changes" |
+ *     "missing_product" | "shipped_incomplete")
  *   - revisioned: whether it has an actual edited/annotated revision saved
  *     in-app (as opposed to just the original doc_manager import)
  *   - checked / checked_cycles / total_cycles: the QC workflow — see
  *     getCheckStatusForPositions above. checked is true only once every
  *     cycle of that project/position has an "ok" order_cycle_checks row.
  *
+ * Only documents whose project/position has actually reached one of the
+ * kiosk finishing states are included at all — before that, there's
+ * nothing to check yet, so there's no point surfacing it here (or marking
+ * it "unchecked", which would be misleading rather than informative).
+ *
  * Query params:
  *   status=complete,missing_product   comma-separated, OR'd together.
- *                                     Include "none" to also match documents
- *                                     with no completion status recorded.
  *   revisioned=true                   only documents with an edited revision
  *   unchecked=true                    only documents not yet fully checked
  */
@@ -299,6 +302,12 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
             // Not archived yet — either no archive row at all (order never
             // tagged Complete), or a row that hasn't been archived yet.
             .whereNull("oal.archived_at")
+            // Must have actually reached one of the kiosk finishing states
+            // (complete, complete_with_changes, missing_product,
+            // shipped_incomplete) — a project/position with no completion
+            // record yet hasn't gone through that process, so it has
+            // nothing to show or check here.
+            .whereNotNull("ocl.status")
             .select(
                 "d.id as document_id",
                 "d.name as document_name",
@@ -311,15 +320,7 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
             );
 
         if (statuses.length > 0) {
-            query = query.where(function (this: any) {
-                if (statuses.includes("none")) {
-                    this.orWhereNull("ocl.status");
-                }
-                const realStatuses = statuses.filter((s) => s !== "none");
-                if (realStatuses.length > 0) {
-                    this.orWhereIn("ocl.status", realStatuses);
-                }
-            });
+            query = query.whereIn("ocl.status", statuses);
         }
 
         const rows = await query.orderBy("d.updated_at", "desc");
