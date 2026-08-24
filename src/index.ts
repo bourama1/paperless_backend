@@ -17,6 +17,7 @@ dotenv.config();
 
 import express from "express";
 import { createServer } from "http";
+import { createServer as createHttpsServer } from "https";
 import { Server } from "socket.io";
 import cors from "cors";
 import morgan from "morgan";
@@ -24,6 +25,8 @@ import path from "path";
 import fs from "fs";
 
 import { getDb } from "./config/database";
+import { apiKeyAuth } from "./middleware/apiKeyAuth";
+import { redactApiKey } from "./utils/redactApiKey";
 
 import queueRoutes from "./routes/queue";
 import filesRoutes from "./routes/files";
@@ -32,12 +35,59 @@ import employeesRoutes from "./routes/employees";
 import prepQueueRoutes from "./routes/prepQueue";
 
 const app = express();
-const httpServer = createServer(app);
+
+// TLS is optional so local/dev setups can keep running over plain HTTP.
+// In any environment reachable over an untrusted network (e.g. the Toors
+// WiFi, which can't be isolated to its own VLAN), both SSL_CERT_PATH and
+// SSL_KEY_PATH must be set.
+const SSL_CERT_PATH = process.env.SSL_CERT_PATH;
+const SSL_KEY_PATH = process.env.SSL_KEY_PATH;
+const useTls = Boolean(SSL_CERT_PATH && SSL_KEY_PATH);
+
+const httpServer = useTls
+    ? createHttpsServer(
+          {
+              cert: fs.readFileSync(SSL_CERT_PATH as string),
+              key: fs.readFileSync(SSL_KEY_PATH as string),
+          },
+          app,
+      )
+    : createServer(app);
+
+if (!useTls && process.env.NODE_ENV !== "test") {
+    console.warn(
+        "[SERVER] SSL_CERT_PATH/SSL_KEY_PATH not set — running plain HTTP. " +
+            "Do not use this over an untrusted network (see README).",
+    );
+}
+
 const io = new Server(httpServer, {
     cors: {
         origin: "*",
         methods: ["GET", "POST"],
     },
+});
+
+// Require the shared API key on every Socket.IO connection too — the
+// header-based apiKeyAuth below only covers plain HTTP routes, and the
+// WebSocket upgrade handshake needs its own check.
+io.use((socket, next) => {
+    const apiKey = process.env.API_KEY;
+    const provided =
+        socket.handshake.auth?.apiKey || socket.handshake.headers["x-api-key"];
+
+    if (!apiKey) {
+        console.error(
+            "[AUTH] API_KEY is not set — rejecting all socket connections.",
+        );
+        return next(new Error("Server misconfigured"));
+    }
+
+    if (!provided || provided !== apiKey) {
+        return next(new Error("Unauthorized"));
+    }
+
+    next();
 });
 
 const PORT = process.env.PORT || 3000;
@@ -61,23 +111,40 @@ app.use(cors());
 app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
-// Log all incoming API requests with their payload
+// Require the shared API key on every route except /health. Must run
+// before the request logger so unauthorized requests aren't logged as if
+// they were legitimate traffic.
+app.use(apiKeyAuth);
+
+// Log all incoming API requests with their payload. The apiKey query param
+// (see middleware/apiKeyAuth.ts) is redacted here so the shared secret
+// never lands in console output.
 app.use((req, res, next) => {
+    const safeUrl = redactApiKey(req.url);
     if (req.body && Object.keys(req.body).length > 0) {
         let bodyStr = JSON.stringify(req.body);
         if (bodyStr.length > 2000) bodyStr = bodyStr.substring(0, 2000) + "...";
-        console.log(`[API] ${req.method} ${req.url} ${bodyStr}`);
+        console.log(`[API] ${req.method} ${safeUrl} ${bodyStr}`);
     } else if (Object.keys(req.query).length > 0) {
-        console.log(
-            `[API] ${req.method} ${req.url} query=${JSON.stringify(req.query)}`,
-        );
+        const safeQuery = { ...req.query };
+        if ("apiKey" in safeQuery) safeQuery.apiKey = "***";
+        console.log(`[API] ${req.method} ${safeUrl} query=${JSON.stringify(safeQuery)}`);
     } else {
-        console.log(`[API] ${req.method} ${req.url}`);
+        console.log(`[API] ${req.method} ${safeUrl}`);
     }
     next();
 });
 
-app.use(morgan("dev"));
+app.use(
+    morgan("dev", {
+        // morgan's "dev" format includes the URL — redact the same param
+        // there too, or the key still leaks via this second logger.
+        skip: () => false,
+        stream: {
+            write: (line: string) => process.stdout.write(redactApiKey(line)),
+        },
+    }),
+);
 
 // Static files for PDFs
 const STORAGE_PATH = process.env.STORAGE_PATH || "./storage";
