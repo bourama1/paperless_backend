@@ -18,6 +18,17 @@
  * Environment variables (.env):
  *   PTL_PLAN_FOLDER_PATH        UNC/local path to watch for the JSON drops
  *   PTL_PLAN_CHECK_INTERVAL_MS  how often to check for a new file (default: 30 min)
+ *   PTL_PLAN_RETAIN_FILES       how many of the most recent plan drops to
+ *                               keep in the queue at once (default: 2)
+ *
+ * Retention: this queue is the only place a pending prep item is visible,
+ * and its only purpose is telling someone what to prepare next — so a row
+ * that drops out of the plan (superseded by a later drop) and was never
+ * actually prepared through the app has no reason to keep showing up. Each
+ * ingest prunes the queue down to just the rows from the
+ * PTL_PLAN_RETAIN_FILES most recent plan files (see pruneOldPlanFiles);
+ * rows that DO get prepared already disappear immediately via the
+ * order_preparation_log check in getPrepQueue, independent of this.
  */
 
 import fs from "fs";
@@ -33,6 +44,11 @@ export const PTL_PLAN_CHECK_INTERVAL_MS = parseInt(
 
 const FILENAME_PATTERN =
     /^(\d{4})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_(\d{2})_productionPlanPTL\.json$/i;
+
+export const PTL_PLAN_RETAIN_FILES = parseInt(
+    process.env.PTL_PLAN_RETAIN_FILES || "2",
+    10,
+);
 
 interface PlanRow {
     workplace: string;
@@ -88,6 +104,44 @@ function findLatestPlanFile(): { filename: string; fullPath: string } | null {
         filename: latest.filename,
         fullPath: path.join(PTL_PLAN_FOLDER_PATH, latest.filename),
     };
+}
+
+/**
+ * Deletes queue rows belonging to any plan file older than the
+ * PTL_PLAN_RETAIN_FILES most recent ones seen in ptl_prep_queue. Rows still
+ * pending from an old drop are, by definition, orders that were never
+ * prepared through the app and have since been superseded — keeping them
+ * around would just build up a growing backlog of stale, no-longer-relevant
+ * entries in the only screen where this plan is shown. Sorts by the
+ * timestamp embedded in the filename (same parser used to pick the latest
+ * file to ingest) rather than assuming alphabetical order, so this keeps
+ * working even if the source system ever changes its naming.
+ */
+async function pruneOldPlanFiles(db: any): Promise<number> {
+    const rows: { source_file: string | null }[] = await db("ptl_prep_queue")
+        .distinct("source_file")
+        .whereNotNull("source_file");
+
+    const filesByRecency = rows
+        .map((r) => ({
+            filename: r.source_file as string,
+            ts: parsePlanFilenameTimestamp(r.source_file as string),
+        }))
+        .filter((f): f is { filename: string; ts: Date } => f.ts !== null)
+        .sort((a, b) => b.ts.getTime() - a.ts.getTime());
+
+    const filesToKeep = filesByRecency
+        .slice(0, PTL_PLAN_RETAIN_FILES)
+        .map((f) => f.filename);
+
+    // Nothing ingested yet, or nothing parses — leave the table alone
+    // rather than risk wiping everything on an unexpected input.
+    if (filesToKeep.length === 0) return 0;
+
+    return db("ptl_prep_queue")
+        .whereNotNull("source_file")
+        .whereNotIn("source_file", filesToKeep)
+        .del();
 }
 
 /** Reads and upserts every row from one plan file into ptl_prep_queue. */
@@ -146,6 +200,13 @@ async function ingestPlanFile(
             last_row_count: ingested,
             last_checked_at: db.fn.now(),
         });
+
+    const pruned = await pruneOldPlanFiles(db);
+    if (pruned > 0) {
+        console.log(
+            `[PTL] Pruned ${pruned} row(s) from plan file(s) older than the ${PTL_PLAN_RETAIN_FILES} most recent`,
+        );
+    }
 
     return ingested;
 }
