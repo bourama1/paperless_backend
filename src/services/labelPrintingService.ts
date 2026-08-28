@@ -31,10 +31,7 @@ import path from "path";
 import net from "net";
 import { getDb } from "../config/database";
 import { OrderUpdate } from "./workstationService";
-import {
-    DOCUMENTS_PRINTER_HOST,
-    printPngFile,
-} from "./documentPrinterService";
+import { DOCUMENTS_PRINTER_HOST, printPngFile } from "./documentPrinterService";
 
 // EU countries that use the 47-line simplified label (from parametry AM:AN)
 const EU_COUNTRIES = new Set([
@@ -142,14 +139,15 @@ function resolveScanPrefix(workplace: string): string | undefined {
 // Workplaces not listed here get every type that matches their scan prefix,
 // unfiltered — this only narrows within a scan-prefix group that's shared
 // by more than one workplace.
-const WORKPLACE_TYPE_FILTER: Record<string, (labelType: string) => boolean> =
-    {
-        motor: (labelType) => !labelType.endsWith("_hw_kr"),
-        hardware: (labelType) => labelType.endsWith("_hw_kr"),
-        predmontazoptolisty: (labelType) => labelType.endsWith("_hw_kr"),
-    };
+const WORKPLACE_TYPE_FILTER: Record<string, (labelType: string) => boolean> = {
+    motor: (labelType) => !labelType.endsWith("_hw_kr"),
+    hardware: (labelType) => labelType.endsWith("_hw_kr"),
+    predmontazoptolisty: (labelType) => labelType.endsWith("_hw_kr"),
+};
 
-function resolveTypeFilter(workplace: string): ((labelType: string) => boolean) | undefined {
+function resolveTypeFilter(
+    workplace: string,
+): ((labelType: string) => boolean) | undefined {
     return WORKPLACE_TYPE_FILTER[normalizeWorkplace(workplace)];
 }
 
@@ -873,16 +871,35 @@ async function recordPrint(
 }
 
 /**
+ * Extracts the trailing door/cycle number from packageType (col 4) — the
+ * "N" in a "N/M" pattern at the end of the string, with or without a
+ * "V -" prefix, e.g. "V - 1/2" → 1, "HW+tracks 2/2" → 2, "section 1/1" → 1.
+ * Returns null when the string doesn't end in that pattern at all (a
+ * genuinely free-text value with no pagination number), so callers can
+ * fall back to the type's cycleFilter instead.
+ */
+export function extractDoorNumber(packageType: string): number | null {
+    const match = /(\d+)\s*\/\s*\d+\s*$/.exec(packageType.trim());
+    return match ? parseInt(match[1]!, 10) : null;
+}
+
+/**
  * Selects which CSV rows belong to a given production cycle (door).
  *
  * Confirmed behaviour: every door prints its own labels during its own
  * cycle — there is no batching to the first/last cycle. Each row's door
- * number is read from packageType (col 4), e.g.:
+ * number is read from packageType (col 4) via extractDoorNumber, e.g.:
  *   "Sektion 2/2"   → door 2
  *   "V - 1/2"       → door 1
  *   "Tormatic 2/2"  → door 2
  *
- * A row prints when its door number matches cycleIndex.
+ * A row prints when its door number matches cycleIndex. This takes
+ * priority over the type's cycleFilter — e.g. a "*_hw_kr" type configured
+ * with cycleFilter "last" would otherwise only ever fire on the final
+ * cycle and dump every door's boxes at once; reading the door number
+ * per-row instead means door 1's boxes print during door 1's cycle, door
+ * 2's during door 2's, and so on, regardless of what the type's
+ * cycleFilter says.
  *
  * Rows with NO door number in packageType (no "N/M" pattern — a genuinely
  * shared item not tied to any single door) fall back to the cycleFilter
@@ -892,9 +909,14 @@ async function recordPrint(
  *   'first' → print only on cycleIndex === 1
  *   'last'  → print only on cycleIndex === totalCycles
  *
+ * NOTE: this does not apply to the Motor workstation — see
+ * selectMotorBatchRows below, which handles that case separately since it
+ * batches every door's hardware into a single physical pass instead of
+ * printing per-door.
+ *
  * Extracted as a standalone, side-effect-free function so it can be tested
  * directly against real CSV samples without needing a database, printer, or
- * network share — see scripts/test-label-preview.ts.
+ * network share.
  */
 /**
  * Returns the cycleFilter for a label type by checking parametryConfig
@@ -917,14 +939,59 @@ function getCycleFilter(labelType: string): CycleFilter {
 
 export function selectRowsForCycle(
     labelRows: LabelRow[],
-    barcodeLastDigit: string,
+    cycleIndex: number,
+    totalCycles: number,
 ): LabelRow[] {
+    const isFirstCycle = cycleIndex === 1;
+    const isLastCycle = cycleIndex === totalCycles;
     return labelRows.filter((row) => {
+        const doorNumber = extractDoorNumber(row.packageType);
+        if (doorNumber !== null) return doorNumber === cycleIndex;
         const cf = getCycleFilter(row.labelType);
-        if (cf === "first") return barcodeLastDigit === "1";
-        if (cf === "last") return barcodeLastDigit === "0";
+        if (cf === "first") return isFirstCycle;
+        if (cf === "last") return isLastCycle;
         return true;
     });
+}
+
+/**
+ * Selects rows for the Motor workstation, which — unlike the per-door
+ * stations above — assembles every door's motor hardware for the whole
+ * order in a single physical pass rather than one visit per door. So
+ * instead of filtering by door number, this takes the first `quantity`
+ * rows (in CSV order) of EACH label type, where quantity is how many
+ * physical units (doors) this order produces — order.quantity, the same
+ * field workstationService already treats as the order's total unit count
+ * (see the order_cycle_state comments in workstationService.ts).
+ *
+ * Capped at however many rows actually exist for a type, so a CSV with
+ * fewer motor rows than the order quantity still prints everything
+ * available instead of erroring. If quantity is missing or invalid (<=0),
+ * falls back to "all rows" — the old, pre-quantity-cap behavior — rather
+ * than printing nothing.
+ *
+ * ASSUMPTION worth confirming against real production data: this reads
+ * order.quantity as "how many doors/motors this order needs, in total,
+ * across every cycle" — not a live "how many are physically in front of
+ * you right now" value from some other API. If the Motor workstation ever
+ * needs the latter instead, this is the function to change.
+ */
+export function selectMotorBatchRows(
+    rows: LabelRow[],
+    quantity: number,
+): LabelRow[] {
+    const byType = new Map<string, LabelRow[]>();
+    for (const row of rows) {
+        const list = byType.get(row.labelType) ?? [];
+        list.push(row);
+        byType.set(row.labelType, list);
+    }
+    const limit = quantity && quantity > 0 ? quantity : Infinity;
+    const selected: LabelRow[] = [];
+    for (const typeRows of byType.values()) {
+        selected.push(...typeRows.slice(0, limit));
+    }
+    return selected;
 }
 
 // ─── main export ─────────────────────────────────────────────────────────────
@@ -1015,9 +1082,21 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 
     // Build a set of all known parametry types for CSV row filtering
     const allParametryTypes = new Set(parametryConfig.map((e: any) => e.type));
-    const cycleRows = labelRows.filter((r) =>
-        allParametryTypes.has(r.labelType),
-    );
+    let cycleRows = labelRows.filter((r) => allParametryTypes.has(r.labelType));
+
+    // The Motor workstation assembles every door's motor hardware for the
+    // whole order in one physical pass instead of one visit per door — see
+    // selectMotorBatchRows for why this needs its own branch instead of the
+    // normal per-door filtering below.
+    const isMotorWorkplace = normalizeWorkplace(order.workplace) === "motor";
+    if (isMotorWorkplace) {
+        cycleRows = selectMotorBatchRows(cycleRows, order.quantity);
+        console.log(
+            `[LABELS] Motor workplace — batching by order.quantity=${order.quantity}: ${cycleRows.length} row(s) selected`,
+        );
+    } else {
+        cycleRows = selectRowsForCycle(cycleRows, cycleIndex, totalCycles);
+    }
 
     console.log(
         `[LABELS] ${cycleRows.length} rows for cycle ${cycleIndex}/${totalCycles} (${labelRows.length} matching in CSV)`,
@@ -1032,12 +1111,18 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         if (entry.scanC !== prefix) continue;
         if (typeFilter && !typeFilter(entry.type)) continue;
 
-        const cf = cycleFilterFromLastCycleNum(entry.lastCycleNum);
-
-        // Cycle filter — mirrors VBA, driven by the real cycleIndex/totalCycles
-        // fields instead of a barcode's last digit.
-        if (cf === "first" && !isFirstCycle) continue;
-        if (cf === "last" && !isLastCycle) continue;
+        // Non-motor entries no longer need a cycleFilter gate here — the
+        // per-door / cycleFilter-fallback decision already happened inside
+        // selectRowsForCycle above, per row. The Motor workstation's
+        // cycleRows aren't cycle-filtered at all (see selectMotorBatchRows),
+        // so its entry still needs this gate to fire only once (normally
+        // cycleFilter "first") rather than re-printing the same batch on
+        // every subsequent cycle event for this order.
+        if (isMotorWorkplace) {
+            const cf = cycleFilterFromLastCycleNum(entry.lastCycleNum);
+            if (cf === "first" && !isFirstCycle) continue;
+            if (cf === "last" && !isLastCycle) continue;
+        }
 
         for (const row of cycleRows) {
             if (row.labelType !== entry.type) continue;
