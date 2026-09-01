@@ -26,6 +26,7 @@ import fs from "fs";
 
 import { getDb } from "./config/database";
 import { apiKeyAuth } from "./middleware/apiKeyAuth";
+import { createWebFrontendMiddleware } from "./middleware/webFrontend";
 import { redactApiKey } from "./utils/redactApiKey";
 
 import queueRoutes from "./routes/queue";
@@ -111,6 +112,34 @@ app.use(cors());
 app.use(express.json({ limit: "100mb" }));
 app.use(express.urlencoded({ limit: "100mb", extended: true }));
 
+// ─── Web frontend (optional) ──────────────────────────────────────────────
+// Serves the mobile app's own web export (`npx expo export --platform web`
+// in the mobile project) so it's reachable as a normal browser app over the
+// company VPN, at the same origin/port as the API — no separate web server,
+// port, or certificate needed. Copy the resulting `dist/` folder here (path
+// configurable via WEB_BUILD_PATH) after each web build.
+//
+// This intentionally sits BEFORE apiKeyAuth: a plain browser navigation (or
+// hitting refresh on a client-side route like /document/123) can't attach a
+// custom header, so the page shell itself has to be public. The actual data
+// the page loads afterward still goes through apiKeyAuth normally — the
+// web build's JS makes the same authenticated axios/socket calls the native
+// app does. Requests matching a real API route prefix (see
+// middleware/webFrontend.ts's isApiRequest) skip straight past this and go
+// through the normal auth + routing below, unchanged.
+const WEB_BUILD_PATH =
+    process.env.WEB_BUILD_PATH || path.join(process.cwd(), "web-dist");
+
+if (fs.existsSync(WEB_BUILD_PATH)) {
+    app.use(createWebFrontendMiddleware(WEB_BUILD_PATH));
+    console.log(`[WEB] Serving web build from ${WEB_BUILD_PATH}`);
+} else if (process.env.NODE_ENV !== "test") {
+    console.log(
+        `[WEB] No web build found at ${WEB_BUILD_PATH} — running API-only. ` +
+            "Run `npx expo export --platform web` in the mobile project and copy dist/ here to enable it.",
+    );
+}
+
 // Require the shared API key on every route except /health. Must run
 // before the request logger so unauthorized requests aren't logged as if
 // they were legitimate traffic.
@@ -128,7 +157,9 @@ app.use((req, res, next) => {
     } else if (Object.keys(req.query).length > 0) {
         const safeQuery = { ...req.query };
         if ("apiKey" in safeQuery) safeQuery.apiKey = "***";
-        console.log(`[API] ${req.method} ${safeUrl} query=${JSON.stringify(safeQuery)}`);
+        console.log(
+            `[API] ${req.method} ${safeUrl} query=${JSON.stringify(safeQuery)}`,
+        );
     } else {
         console.log(`[API] ${req.method} ${safeUrl}`);
     }

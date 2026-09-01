@@ -166,3 +166,57 @@ API:
 See the [mobile repo's README](https://github.com/bourama1/paperless_mobile/blob/main/README.md) for the client-side
 details. In short: **this backend is the single source of truth and event
 bus; the mobile app is a thin, mostly stateless UI over it.**
+
+## 8. Web frontend (optional)
+
+The same `paperless_mobile` codebase can also run as a browser app, served
+directly by this backend at the same origin/port — no separate web server,
+port, or certificate. Intended for internal access over the company VPN,
+not public exposure (see the caveats below).
+
+**Build and deploy:**
+
+```bash
+# in the mobile project
+npx expo export --platform web
+# copy the resulting dist/ folder to wherever WEB_BUILD_PATH points, e.g.:
+cp -r dist /path/to/backend/web-dist
+```
+
+Set `WEB_BUILD_PATH` in this project's `.env` (see `.env.example`) to that
+folder's path, then restart the server. The console logs which mode it's
+running in on startup (`[WEB] Serving web build from ...` vs
+`[WEB] No web build found ... running API-only`). Leaving `WEB_BUILD_PATH`
+unset, or pointing it somewhere that doesn't exist, disables the web
+frontend entirely — the API keeps working exactly as before either way.
+
+**How the routing works:** requests matching a real API prefix
+(`/workstations`, `/queue`, `/files`, `/employees`, `/prep-queue`,
+`/health` — see `middleware/webFrontend.ts`) go through the normal
+`apiKeyAuth` + route handling, unchanged. Everything else is treated as a
+page request: a real static file (JS bundle, fonts, images) is served
+directly if it exists, and any other GET falls back to the same
+`index.html` shell so expo-router's client-side routing resolves correctly
+on a fresh load or page refresh (e.g. `/document/123`). This part is
+deliberately public — a plain browser navigation can't attach a custom
+`X-API-Key` header — but the actual data the page fetches afterward goes
+through the normal authenticated API calls, same as the native app.
+
+**Two things worth knowing before relying on this:**
+
+- **The API key ships inside the page's JS bundle.** `EXPO_PUBLIC_API_KEY`
+  gets inlined into client-side JS for web the same way it's baked into the
+  native app binary — except a browser makes it trivially visible via
+  "View Source" or dev tools, unlike a compiled app most people never
+  inspect. Fine for access gated behind your VPN; not something to expose
+  further without adding a real login layer in front of it.
+- **The self-signed TLS certificate isn't trusted by browsers.** The
+  Android app trusts it via the bundled network security config plugin
+  (see the mobile project's `plugins/withBackendCertPinning.js`) — that
+  mechanism is Android-specific and doesn't apply to a browser. Anyone
+  hitting this over HTTPS in a browser will get a "not secure" warning
+  unless `server.crt` (see this backend's TLS setup) is also installed as a
+  trusted certificate on their machine — on Windows, double-click the
+  `.crt` file → "Install Certificate" → Local Machine → Trusted Root
+  Certification Authorities. Worth pushing via Group Policy if there's an
+  Active Directory domain, rather than doing it by hand per laptop.

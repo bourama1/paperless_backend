@@ -32,6 +32,22 @@ powershell -Command "Copy-Item -LiteralPath '%REPO%\.env' -Destination '%OUT%\.e
 if %ERRORLEVEL% neq 0 (
     echo WARNING: .env copy returned %ERRORLEVEL%
 )
+echo NOTE: .env.example was copied from your local .env. If it contains
+echo real secrets ^(API_KEY, DB passwords, etc.^) rather than placeholders,
+echo replace them before handing this zip to anyone else.
+
+echo === Step 3b: Copy web frontend build (optional) ===
+if exist "%REPO%\web-dist" (
+    xcopy /e /i /q "%REPO%\web-dist" "%OUT%\web-dist"
+    if %ERRORLEVEL% neq 0 (
+        echo WARNING: xcopy web-dist returned %ERRORLEVEL%
+    ) else (
+        echo   Copied web-dist ^(run: npx expo export --platform web ^& copy dist/ to %REPO%\web-dist to keep this up to date^)
+    )
+) else (
+    echo   No web-dist folder found at %REPO%\web-dist — skipping ^(API-only build^).
+    echo   See README.md section 8 to enable the web frontend.
+)
 
 echo === Step 4: Create zip archive ===
 for /f "delims=" %%i in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMdd'"') do set ZIPDATE=%%i
@@ -60,6 +76,11 @@ if exist "%OUT%\config\label-type-config.json" (
     echo   [OK] config\label-type-config.json
 ) else (
     echo   [MISSING] config\label-type-config.json
+)
+if exist "%OUT%\web-dist\index.html" (
+    echo   [OK] web-dist ^(web frontend included^)
+) else (
+    echo   [--] web-dist not included ^(API-only — this is fine if you don't need the web frontend^)
 )
 if exist "%OUT%\%ZIPNAME%" (
     echo   [OK] %ZIPNAME%
