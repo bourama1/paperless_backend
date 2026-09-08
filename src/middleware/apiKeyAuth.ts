@@ -1,8 +1,12 @@
 import { Request, Response, NextFunction } from "express";
 
-// Only the liveness check stays open — load balancers/monitoring hit this
-// without credentials, and it leaks nothing sensitive.
-const PUBLIC_PATHS = new Set(["/health"]);
+// Paths that stay open without credentials:
+// - /health: liveness check for load balancers/monitoring — leaks nothing.
+// - /workstations/order-update: webhook pushed by the external production
+//   system on STARTED/FINISHED order events. That system isn't ours, so it
+//   can't send X-API-Key; this webhook drives order completion and
+//   workstation state, so it must remain reachable without a key.
+const PUBLIC_PATHS = new Set(["/health", "/workstations/order-update"]);
 
 export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
     if (PUBLIC_PATHS.has(req.path)) {

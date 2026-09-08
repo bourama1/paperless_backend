@@ -7,6 +7,9 @@ function buildApp() {
     app.use(apiKeyAuth);
     app.get("/health", (req, res) => res.json({ status: "ok" }));
     app.get("/protected", (req, res) => res.json({ status: "ok" }));
+    app.post("/workstations/order-update", (req, res) =>
+        res.json({ status: "ok" }),
+    );
     return app;
 }
 
@@ -20,6 +23,16 @@ describe("apiKeyAuth middleware", () => {
     it("allows /health through without a key, even when unconfigured", async () => {
         delete process.env.API_KEY;
         const response = await request(buildApp()).get("/health");
+        expect(response.status).toBe(200);
+    });
+
+    it("allows POST /workstations/order-update through without a key", async () => {
+        // Webhook from the external production system, which can't send the
+        // API key — must stay reachable even when unconfigured.
+        delete process.env.API_KEY;
+        const response = await request(buildApp()).post(
+            "/workstations/order-update",
+        );
         expect(response.status).toBe(200);
     });
 
