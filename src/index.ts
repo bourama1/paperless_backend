@@ -15,6 +15,26 @@
 import dotenv from "dotenv";
 dotenv.config();
 
+// Initialize file logging (app.log) before any other module is loaded, so
+// module-level console.* calls are captured too. Must stay right below
+// dotenv.config() — see the comment at the top of the file for why order
+// matters here.
+import { logger, initFileLogging } from "./utils/logger";
+initFileLogging();
+
+// Log fatal process-level errors into app.log, then exit with a failure
+// code — this preserves Node's default crash behavior for uncaught
+// exceptions/unhandled rejections while making sure the cause is persisted
+// (before, these only went to the console and were lost on restart).
+process.on("unhandledRejection", (reason) => {
+    logger.error("PROCESS", "Unhandled promise rejection:", reason);
+    process.exit(1);
+});
+process.on("uncaughtException", (error) => {
+    logger.error("PROCESS", "Uncaught exception:", error);
+    process.exit(1);
+});
+
 import express from "express";
 import { createServer } from "http";
 import { createServer as createHttpsServer } from "https";
@@ -56,8 +76,9 @@ const httpServer = useTls
     : createServer(app);
 
 if (!useTls && process.env.NODE_ENV !== "test") {
-    console.warn(
-        "[SERVER] SSL_CERT_PATH/SSL_KEY_PATH not set — running plain HTTP. " +
+    logger.warn(
+        "SERVER",
+        "SSL_CERT_PATH/SSL_KEY_PATH not set — running plain HTTP. " +
             "Do not use this over an untrusted network (see README).",
     );
 }
@@ -78,8 +99,9 @@ io.use((socket, next) => {
         socket.handshake.auth?.apiKey || socket.handshake.headers["x-api-key"];
 
     if (!apiKey) {
-        console.error(
-            "[AUTH] API_KEY is not set — rejecting all socket connections.",
+        logger.error(
+            "AUTH",
+            "API_KEY is not set — rejecting all socket connections.",
         );
         return next(new Error("Server misconfigured"));
     }
@@ -97,9 +119,9 @@ const PORT = process.env.PORT || 3000;
 const initDb = async () => {
     try {
         await getDb();
-        console.log("Database initialized successfully");
+        logger.info("DB", "Database initialized successfully");
     } catch (error) {
-        console.error("Failed to initialize database:", error);
+        logger.error("DB", "Failed to initialize database:", error);
     }
 };
 
@@ -127,15 +149,18 @@ app.use(express.urlencoded({ limit: "100mb", extended: true }));
 // app does. Requests matching a real API route prefix (see
 // middleware/webFrontend.ts's isApiRequest) skip straight past this and go
 // through the normal auth + routing below, unchanged.
-const WEB_BUILD_PATH =
-    process.env.WEB_BUILD_PATH || path.join(process.cwd(), "web-dist");
+const WEB_BUILD_PATH = path.resolve(
+    process.cwd(),
+    process.env.WEB_BUILD_PATH || "web-dist",
+);
 
 if (fs.existsSync(WEB_BUILD_PATH)) {
     app.use(createWebFrontendMiddleware(WEB_BUILD_PATH));
-    console.log(`[WEB] Serving web build from ${WEB_BUILD_PATH}`);
+    logger.info("WEB", `Serving web build from ${WEB_BUILD_PATH}`);
 } else if (process.env.NODE_ENV !== "test") {
-    console.log(
-        `[WEB] No web build found at ${WEB_BUILD_PATH} — running API-only. ` +
+    logger.info(
+        "WEB",
+        `No web build found at ${WEB_BUILD_PATH} — running API-only. ` +
             "Run `npx expo export --platform web` in the mobile project and copy dist/ here to enable it.",
     );
 }
@@ -153,15 +178,16 @@ app.use((req, res, next) => {
     if (req.body && Object.keys(req.body).length > 0) {
         let bodyStr = JSON.stringify(req.body);
         if (bodyStr.length > 2000) bodyStr = bodyStr.substring(0, 2000) + "...";
-        console.log(`[API] ${req.method} ${safeUrl} ${bodyStr}`);
+        logger.info("API", `${req.method} ${safeUrl} ${bodyStr}`);
     } else if (Object.keys(req.query).length > 0) {
         const safeQuery = { ...req.query };
         if ("apiKey" in safeQuery) safeQuery.apiKey = "***";
-        console.log(
-            `[API] ${req.method} ${safeUrl} query=${JSON.stringify(safeQuery)}`,
+        logger.info(
+            "API",
+            `${req.method} ${safeUrl} query=${JSON.stringify(safeQuery)}`,
         );
     } else {
-        console.log(`[API] ${req.method} ${safeUrl}`);
+        logger.info("API", `${req.method} ${safeUrl}`);
     }
     next();
 });
@@ -172,7 +198,8 @@ app.use(
         // there too, or the key still leaks via this second logger.
         skip: () => false,
         stream: {
-            write: (line: string) => process.stdout.write(redactApiKey(line)),
+            write: (line: string) =>
+                logger.info("HTTP", redactApiKey(line).trimEnd()),
         },
     }),
 );
@@ -200,17 +227,17 @@ app.get("/health", (req, res) => {
 
 // Socket.io connection
 io.on("connection", (socket) => {
-    console.log("Client connected:", socket.id);
+    logger.info("SOCKET", `Client connected: ${socket.id}`);
 
-    socket.on("disconnect", () => {
-        console.log("Client disconnected:", socket.id);
+    socket.on("disconnect", (reason) => {
+        logger.info("SOCKET", `Client disconnected: ${socket.id} (${reason})`);
     });
 });
 
 // Start server
 if (process.env.NODE_ENV !== "test") {
     httpServer.listen(PORT, () => {
-        console.log(`Server running on port ${PORT}`);
+        logger.info("SERVER", `Server running on port ${PORT}`);
 
         // Start polling workstations
         const { pollWorkstations } = require("./services/workstationService");
@@ -220,7 +247,8 @@ if (process.env.NODE_ENV !== "test") {
         );
         pollWorkstations();
         setInterval(pollWorkstations, POLL_INTERVAL);
-        console.log(
+        logger.info(
+            "SERVER",
             `Workstation polling started (interval: ${POLL_INTERVAL}ms)`,
         );
 
@@ -231,7 +259,8 @@ if (process.env.NODE_ENV !== "test") {
         } = require("./services/archivalService");
         runArchivalSweep();
         setInterval(runArchivalSweep, ARCHIVE_POLL_INTERVAL_MS);
-        console.log(
+        logger.info(
+            "SERVER",
             `Retention archival sweep started (interval: ${ARCHIVE_POLL_INTERVAL_MS}ms)`,
         );
 
@@ -243,7 +272,8 @@ if (process.env.NODE_ENV !== "test") {
         } = require("./services/ptlPlanService");
         checkForNewPlan();
         setInterval(checkForNewPlan, PTL_PLAN_CHECK_INTERVAL_MS);
-        console.log(
+        logger.info(
+            "SERVER",
             `PTL production plan check started (interval: ${PTL_PLAN_CHECK_INTERVAL_MS}ms)`,
         );
     });

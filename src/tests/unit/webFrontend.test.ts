@@ -114,3 +114,64 @@ describe("createWebFrontendMiddleware", () => {
         expect(response.status).toBe(401);
     });
 });
+
+describe("createWebFrontendMiddleware — relative path regression (production incident)", () => {
+    // The existing describe block above only ever exercises an ABSOLUTE
+    // webBuildPath (fs.mkdtempSync returns one) — which is exactly why the
+    // real bug shipped despite that coverage: WEB_BUILD_PATH=.\web-dist in
+    // .env is relative, and a relative path reaching res.sendFile() throws
+    // "path must be absolute or specify root to res.sendFile" — a
+    // synchronous throw from inside serve-static's own error callback,
+    // outside Express's normal request-handler try/catch, which crashed
+    // the entire Node process in production (not just the web frontend —
+    // the whole API went down until manually restarted). These tests use
+    // a genuinely relative path to make sure that specific scenario is
+    // covered, not just the absolute-path happy path.
+    let tmpRoot: string;
+    let relativeWebBuildPath: string;
+    let originalCwd: string;
+
+    beforeAll(() => {
+        tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "web-frontend-relpath-test-"));
+        fs.writeFileSync(path.join(tmpRoot, "index.html"), "<html>SPA shell</html>");
+        originalCwd = process.cwd();
+        // Simulate the real deployment: cwd is the app's working directory,
+        // and WEB_BUILD_PATH is a relative path like ".\web-dist" from
+        // there — createWebFrontendMiddleware must resolve this itself
+        // rather than assume the caller already made it absolute.
+        process.chdir(tmpRoot);
+        relativeWebBuildPath = ".";
+    });
+
+    afterAll(() => {
+        process.chdir(originalCwd);
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+    });
+
+    it("serves the SPA fallback correctly when given a RELATIVE path, without crashing", async () => {
+        const app = express();
+        app.use(createWebFrontendMiddleware(relativeWebBuildPath));
+        app.use((req, res) => res.status(401).json({ error: "Unauthorized" }));
+
+        // /document/123 has no matching static file, so this specifically
+        // exercises the res.sendFile() fallback path that crashed in
+        // production — this is the regression test for that exact bug.
+        const response = await request(app).get("/document/123");
+        expect(response.status).toBe(200);
+        expect(response.text).toContain("SPA shell");
+    });
+
+    it("responds with a clean 500 (not a crash) when index.html is missing entirely", async () => {
+        const emptyDir = fs.mkdtempSync(path.join(os.tmpdir(), "web-frontend-empty-"));
+        try {
+            const app = express();
+            app.use(createWebFrontendMiddleware(emptyDir));
+            app.use((req, res) => res.status(401).json({ error: "Unauthorized" }));
+
+            const response = await request(app).get("/some/client-route");
+            expect(response.status).toBe(500);
+        } finally {
+            fs.rmSync(emptyDir, { recursive: true, force: true });
+        }
+    });
+});

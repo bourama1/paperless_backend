@@ -25,10 +25,19 @@ hardware labels/QR stickers, and pushes live updates over Socket.IO.
   (`ptlPlanService.ts`).
 - **Order completion / employee tracking** — kiosk-style "who finished this
   order and what was its status" logging (`completionController.ts`).
+- **Prep-station labels** — 100 × 130 mm Godex-sized label PDFs with a Code
+  39 ("3 of 9") barcode of the order/project number, rendered with the BC
+  3of9 Light font (embedded into the PDF when the font file is found; vector
+  bars otherwise) — `documentPrinterService.buildPrepLabelPdf`,
+  `utils/code39Barcode.ts`.
 - **Retention archival** — periodic sweep that moves finished orders' PDFs
   to PDF/A and archives them to a network share (`archivalService.ts`).
 - **Document printing** — sends rendered documents to a network printer
   (`documentPrinterService.ts`).
+- **Logging** — timestamped, leveled logs go to the console **and**
+  `app.log` in the project root (`utils/logger.ts`). All pre-existing
+  `console.*` output is captured into the file too, so the file is a
+  complete record across restarts.
 
 ## 2. Tech stack
 
@@ -76,6 +85,8 @@ src/
 │   └── notificationService.ts    # queue-updated / queue-new-item socket emits
 ├── models/
 ├── utils/
+│   ├── logger.ts             # Leveled logger: console + app.log capture
+│   └── code39Barcode.ts      # Code 39 geometry, BC3of9 font discovery + PDF embedding
 └── tests/
     ├── unit/
     ├── integration/
@@ -130,6 +141,15 @@ npm install
 cp .env.example .env      # fill in DB + network share + printer settings
 npm run dev                # nodemon + ts-node, watches src/**/*.ts
 ```
+
+The server logs to the console and appends to `app.log` in the project
+root (gitignored). Tune with `LOG_LEVEL` (`debug|info|warn|error`, default
+`info`) and `LOG_FILE_PATH` in `.env` — see `.env.example`.
+
+For the barcode on prep-station labels, drop the `BC C39 3 of 9 Light.ttf`
+font file into `config/` (or point `PREP_LABEL_BARCODE_FONT_PATH` at it).
+Without it the barcode is drawn as vector bars instead — same symbology,
+slightly different look.
 
 Other scripts:
 

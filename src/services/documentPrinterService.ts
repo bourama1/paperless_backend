@@ -29,6 +29,17 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { GHOSTSCRIPT_BIN } from "./pdfaService";
+import {
+    buildTrueTypeFontObjects,
+    code39Geometry,
+    code39VectorOps,
+    escapePdfString,
+    findCode39FontFile,
+    parseTrueType,
+    sanitizeCode39,
+    stringAdvance,
+    TrueTypeFontInfo,
+} from "../utils/code39Barcode";
 
 export const DOCUMENTS_PRINTER_HOST = process.env.DOCUMENTS_PRINTER_HOST || "";
 export const DOCUMENTS_PRINTER_PORT = parseInt(
@@ -298,31 +309,139 @@ export async function printPngFile(
 
 // ─── prep-station label PDF ─────────────────────────────────────────────────
 //
-// A plain, generic PDF for the external-items prep station — deliberately
-// NOT tied to any specific printer (Godex/EZPL or otherwise), since the
-// target printer for this station hasn't been decided yet. Whoever prints
-// it can just send this PDF to whatever printer ends up being used.
+// Label PDF for the external-items prep station, sized for the Godex
+// EZ2250i label printer: 100 × 130 mm — the same stock the production
+// labels use (EZPL ^W100 / ^Q130 in labelPrintingService.ts; at the
+// printer's 203 dpi that maps to ≈796 × 1034 dots, matching the ≈794 ×
+// 1033 dot canvas of the captured aktualniCMD .prn). Ghostscript renders
+// this PDF with the same pipeline as every other document
+// (renderPdfForPrinter), so no EZPL is needed here.
 //
-// Built by hand (no PDF library) the same way buildPdfFromPng is, but using
-// PDF's built-in Helvetica font instead of an embedded image — a base-14
-// font needs no embedding, so this stays tiny and dependency-free.
+// The label carries the order/project number, position, who prepared it,
+// a timestamp, the box counter (when the order has more than one), and a
+// Code 39 ("3 of 9") barcode of the project number rendered with the
+// BC 3of9 Light barcode font — see utils/code39Barcode.ts. When that font
+// file can't be found, the barcode falls back to vector-drawn bars so the
+// label stays scannable regardless.
+//
+// Built by hand (no PDF library) the same way buildPdfFromPng is, using
+// PDF built-in fonts plus (when available) the embedded TrueType barcode
+// font — embedding is what makes the barcode print correctly on the
+// printer, which otherwise has no BC 3of9 Light installed.
+
+// 100 mm × 130 mm label stock in points (1 mm = 72/25.4 pt).
+const PREP_LABEL_PAGE_WIDTH_PT = 283.46;
+const PREP_LABEL_PAGE_HEIGHT_PT = 368.5;
 
 function escapePdfText(s: string): string {
     return s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
 }
 
 /**
- * Builds an A4 PDF identifying an order/position and who prepared it, with
- * a timestamp — one page per cycle (box) when totalCycles > 1, each
- * labeled "cycleIndex/totalCycles" so a batch of physical boxes for the
- * same order/position/project can be told apart. totalCycles defaults to 1
+ * Builds the barcode block content ops for one label page.
+ *
+ * Font path (BC 3of9 Light found): the sanitized project number wrapped in
+ * * delimiters is drawn with the embedded TrueType font, sized so the
+ * symbol fits the printable width (the exact advance widths come from the
+ * font's hmtx table, so the fit is precise, not estimated).
+ *
+ * Vector fallback: bars are drawn from the Code 39 element table at a
+ * narrow-element width chosen to fit the same printable width.
+ *
+ * Both paths add a small human-readable line under the bars. Returns an
+ * empty string when there is nothing to encode.
+ */
+function buildBarcodeOps(
+    font: TrueTypeFontInfo | null,
+    projectNumber: string,
+): string {
+    const sanitized = sanitizeCode39(projectNumber);
+    if (!sanitized) return "";
+
+    const printableWidth = PREP_LABEL_PAGE_WIDTH_PT - 24; // 12pt margins
+    const ops: string[] = [];
+
+    if (font) {
+        try {
+            const text = `*${sanitized}*`;
+            const advance = stringAdvance(font, text);
+            if (advance > 0) {
+                const fitSize =
+                    (printableWidth * font.unitsPerEm) / advance;
+                const size = Math.max(8, Math.min(72, fitSize));
+                const widthPt = (advance * size) / font.unitsPerEm;
+                const x = (PREP_LABEL_PAGE_WIDTH_PT - widthPt) / 2;
+                const baselineY = PREP_LABEL_PAGE_HEIGHT_PT - 212;
+                ops.push(
+                    `BT /F2 ${size.toFixed(2)} Tf ${x.toFixed(2)} ${baselineY.toFixed(2)} Td (${escapePdfString(text)}) Tj ET`,
+                );
+                // Human-readable interpretation line, centered (Helvetica
+                // average advance ≈ 0.55 em — estimate is fine for centering).
+                const readableSize = 11;
+                const readableWidth = sanitized.length * readableSize * 0.55;
+                const rx = (PREP_LABEL_PAGE_WIDTH_PT - readableWidth) / 2;
+                ops.push(
+                    `BT /F1 ${readableSize} Tf ${rx.toFixed(2)} ${(PREP_LABEL_PAGE_HEIGHT_PT - 230).toFixed(2)} Td (${escapePdfString(sanitized)}) Tj ET`,
+                );
+            }
+        } catch (err: any) {
+            // Font parse/measure failure — fall through to vector bars
+            // rather than printing a label without a barcode.
+            console.warn(
+                `[PRINT] Barcode font unusable (${err.message}) — drawing vector barcode`,
+            );
+        }
+    }
+
+    if (ops.length === 0) {
+        // Vector fallback (or font embedding failed above). The narrow
+        // element width is auto-sized so the WHOLE symbol fits the
+        // printable width — Code 39 grows ~15 narrow units per character,
+        // so a fixed width would clip longer project numbers off the
+        // label edge. 2.6pt is the cap for short numbers (≈8px at the
+        // Godex's 203 dpi — comfortably above the 2px minimum printers
+        // resolve reliably).
+        const units = code39Geometry(sanitized, 1).totalWidth; // narrow = 1pt baseline
+        const narrowPt = Math.min(2.6, printableWidth / units);
+        const { ops: barOps, totalWidth } = code39VectorOps(
+            sanitized,
+            0,
+            PREP_LABEL_PAGE_HEIGHT_PT - 214,
+            46,
+            narrowPt,
+        );
+        // code39VectorOps draws from its x argument; shift the whole symbol
+        // so it's centered by translating: emit a cm transform around it.
+        const x = (PREP_LABEL_PAGE_WIDTH_PT - totalWidth) / 2;
+        ops.push(
+            `q 1 0 0 1 ${x.toFixed(2)} 0 cm`,
+            barOps,
+            "Q",
+        );
+        const readableSize = 11;
+        const readableWidth = sanitized.length * readableSize * 0.55;
+        const rx = (PREP_LABEL_PAGE_WIDTH_PT - readableWidth) / 2;
+        ops.push(
+            `BT /F1 ${readableSize} Tf ${rx.toFixed(2)} ${(PREP_LABEL_PAGE_HEIGHT_PT - 230).toFixed(2)} Td (${escapePdfString(sanitized)}) Tj ET`,
+        );
+    }
+
+    return ops.join("\n");
+}
+
+/**
+ * Builds a 100 × 130 mm Godex label PDF identifying an order/position and
+ * who prepared it, with a timestamp and a Code 39 barcode of the project
+ * number — one page per cycle (box) when totalCycles > 1, each labeled
+ * "cycleIndex/totalCycles" so a batch of physical boxes for the same
+ * order/position/project can be told apart. totalCycles defaults to 1
  * for a single-box order. Uses WinAnsiEncoding so common accented Latin
  * characters (á, é, í, ó, ú, ý, ...) render correctly — NOTE: Czech-specific
  * letters not present in WinAnsi (č, ř, š, ž, ě, ď, ť, ň) will not render
- * correctly with this base font; a real Czech name may show those letters
- * missing or wrong. Proper support would need an embedded TrueType font —
- * fine for now given this is a provisional label until the real printer
- * (and label format) is decided.
+ * correctly with these base fonts; a real Czech name may show those letters
+ * missing or wrong. Proper support would need an embedded TrueType text
+ * font (the barcode font IS embedded when found — see
+ * utils/code39Barcode.ts).
  */
 export function buildPrepLabelPdf(
     projectNumber: string,
@@ -337,49 +456,83 @@ export function buildPrepLabelPdf(
         minute: "2-digit",
     });
 
-    const pageWidth = 595.28; // A4, points
-    const pageHeight = 841.89;
+    const pageWidth = PREP_LABEL_PAGE_WIDTH_PT;
+    const pageHeight = PREP_LABEL_PAGE_HEIGHT_PT;
     const pageCount = Math.max(1, totalCycles);
 
+    // Locate + parse the barcode font once per call; null → the barcode
+    // is drawn as vector bars instead (see buildBarcodeOps).
+    let barcodeFont: TrueTypeFontInfo | null = null;
+    const fontPath = findCode39FontFile();
+    if (fontPath) {
+        try {
+            barcodeFont = parseTrueType(fs.readFileSync(fontPath));
+        } catch (err: any) {
+            console.warn(
+                `[PRINT] Barcode font ${fontPath} unusable (${err.message}) — drawing vector barcode`,
+            );
+        }
+    }
+    const barcodeOps = buildBarcodeOps(barcodeFont, projectNumber);
+
+    // y values are measured from the TOP of the label here and converted to
+    // PDF user space (origin bottom-left) at emit time.
     function pageContentOps(cycleIndex: number): string {
-        const lines: { text: string; size: number; y: number }[] = [
-            { text: "OBJEDNAVKA", size: 20, y: pageHeight - 120 },
-            { text: projectNumber, size: 48, y: pageHeight - 175 },
-            { text: "POZICE", size: 20, y: pageHeight - 260 },
-            { text: position, size: 48, y: pageHeight - 315 },
-            { text: `Pripravil: ${employeeName}`, size: 16, y: pageHeight - 380 },
-            { text: `${dateStr} ${timeStr}`, size: 12, y: pageHeight - 405 },
+        const lines: { text: string; size: number; y: number; bold?: boolean }[] = [
+            { text: "OBJEDNAVKA", size: 13, y: 30, bold: true },
+            { text: projectNumber, size: 30, y: 66, bold: true },
+            { text: "POZICE", size: 13, y: 102, bold: true },
+            { text: position, size: 30, y: 138, bold: true },
+            { text: `Pripravil: ${employeeName}`, size: 12, y: 264 },
+            { text: `${dateStr} ${timeStr}`, size: 10, y: 282 },
         ];
         // Only show the cycle/box counter when there's more than one box —
         // a single-box order's label stays exactly as it was before.
         if (pageCount > 1) {
             lines.push(
-                { text: "BALENI", size: 20, y: pageHeight - 460 },
-                { text: `${cycleIndex}/${pageCount}`, size: 36, y: pageHeight - 505 },
+                { text: "BALENI", size: 13, y: 312, bold: true },
+                { text: `${cycleIndex}/${pageCount}`, size: 24, y: 344, bold: true },
             );
         }
         return lines
             .map(
                 (l) =>
-                    `BT /F1 ${l.size} Tf 60 ${l.y.toFixed(2)} Td (${escapePdfText(l.text)}) Tj ET`,
+                    `BT /F${l.bold ? "3" : "1"} ${l.size} Tf 40 ${(pageHeight - l.y).toFixed(2)} Td (${escapePdfText(l.text)}) Tj ET`,
             )
+            .concat(barcodeOps ? [barcodeOps] : [])
             .join("\n");
     }
 
-    // Object layout: 1 = Catalog, 2 = Pages, 3..3+N-1 = Page objects,
-    // 3+N..3+2N-1 = per-page Content streams, 3+2N = shared Font. Kept
-    // dynamic (not hardcoded object numbers) so this generalizes cleanly
-    // from the original fixed 5-object single-page layout to N pages.
+    // The parsed font carries its raw TTF bytes for embedding. When present
+    // it adds three objects: /Font F2, its /FontDescriptor and the
+    // /FontFile2 stream with the raw TTF bytes.
+    const barcodeFontFile = barcodeFont ? barcodeFont.fontData : null;
+
+    // Object layout (N = pageCount):
+    //   1 = Catalog, 2 = Pages,
+    //   3..3+N-1 = Page objects, 3+N..3+2N-1 = per-page Content streams,
+    //   then F1 (Helvetica), F3 (Helvetica-Bold), and — when the barcode
+    //   font is available — F2 (TrueType), FontDescriptor, FontFile2.
+    // Kept dynamic (not hardcoded object numbers) so this generalizes
+    // cleanly from the original fixed 5-object single-page layout to N pages.
     const pageObjBase = 3;
     const contentObjBase = pageObjBase + pageCount;
-    const fontObjNum = contentObjBase + pageCount;
+    const f1ObjNum = contentObjBase + pageCount;
+    const f3ObjNum = f1ObjNum + 1;
+    const f2ObjNum = f3ObjNum + 1; // only allocated when barcodeFontFile
+    const descObjNum = f2ObjNum + 1;
+    const fileObjNum = descObjNum + 1;
 
     const pageKids = Array.from(
         { length: pageCount },
         (_, i) => `${pageObjBase + i} 0 R`,
     ).join(" ");
 
-    const objects: string[] = [];
+    const fontResources = barcodeFontFile
+        ? `<< /F1 ${f1ObjNum} 0 R /F3 ${f3ObjNum} 0 R /F2 ${f2ObjNum} 0 R >>`
+        : `<< /F1 ${f1ObjNum} 0 R /F3 ${f3ObjNum} 0 R >>`;
+
+    const objects: (string | { dict: string; data: Buffer })[] = [];
     objects.push(`<< /Type /Catalog /Pages 2 0 R >>`); // 1
     objects.push(
         `<< /Type /Pages /Kids [${pageKids}] /Count ${pageCount} >>`,
@@ -389,24 +542,40 @@ export function buildPrepLabelPdf(
         const contentObjNum = contentObjBase + i;
         objects.push(
             `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] ` +
-                `/Resources << /Font << /F1 ${fontObjNum} 0 R >> >> /Contents ${contentObjNum} 0 R >>`,
+                `/Resources << /Font ${fontResources} >> /Contents ${contentObjNum} 0 R >>`,
         ); // pageObjBase + i
     }
 
     for (let i = 0; i < pageCount; i++) {
         const textOps = pageContentOps(i + 1);
-        objects.push(`<< /Length ${textOps.length} >>\nstream\n${textOps}\nendstream`); // contentObjBase + i
+        objects.push(
+            `<< /Length ${Buffer.byteLength(textOps, "latin1")} >>\nstream\n${textOps}\nendstream`,
+        ); // contentObjBase + i
     }
 
     objects.push(
         "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
-    ); // fontObjNum
+    ); // f1ObjNum
+    objects.push(
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+    ); // f3ObjNum
+
+    if (barcodeFont && barcodeFontFile) {
+        const { descriptorDict, fontFileDict, fontDict } =
+            buildTrueTypeFontObjects(barcodeFont);
+        objects.push(fontDict.replace("%FONT_DESC_OBJ%", String(descObjNum))); // f2ObjNum
+        objects.push(descriptorDict.replace("%FONT_FILE_OBJ%", String(fileObjNum))); // descObjNum
+        // One object = dict + binary stream. The TTF bytes must never pass
+        // through a latin1 string (they'd be mangled), so they stay a Buffer
+        // and are written verbatim between stream/endstream.
+        objects.push({ dict: fontFileDict, data: barcodeFontFile }); // fileObjNum
+    }
 
     const chunks: Buffer[] = [];
     const offsets: number[] = [0];
     let pos = 0;
-    const push = (s: string) => {
-        const b = Buffer.from(s, "latin1");
+    const push = (s: string | Buffer) => {
+        const b = typeof s === "string" ? Buffer.from(s, "latin1") : s;
         chunks.push(b);
         pos += b.length;
     };
@@ -414,7 +583,15 @@ export function buildPrepLabelPdf(
     push("%PDF-1.4\n");
     for (let i = 0; i < objects.length; i++) {
         offsets.push(pos);
-        push(`${i + 1} 0 obj\n${objects[i]}\nendobj\n`);
+        const obj = objects[i]!;
+        if (typeof obj === "string") {
+            push(`${i + 1} 0 obj\n${obj}\nendobj\n`);
+        } else {
+            // Binary stream object (FontFile2).
+            push(`${i + 1} 0 obj\n${obj.dict}\nstream\n`);
+            push(obj.data);
+            push("\nendstream\nendobj\n");
+        }
     }
 
     const xrefStart = pos;
