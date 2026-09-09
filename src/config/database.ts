@@ -3,6 +3,58 @@ import knex, { Knex } from "knex";
 let db: Knex | null = null;
 let initPromise: Promise<Knex> | null = null;
 
+// ─── Masterplan DB (read-only, no schema setup needed) ────────────────────────
+// Same server as the main paperless DB; only the database name differs.
+// The Masterplan database is external — we never create or migrate tables in
+// it, so getMasterplanDb() just creates a connection and returns it, with no
+// setupDatabase() equivalent.
+let masterplanDb: Knex | null = null;
+let masterplanInitPromise: Promise<Knex> | null = null;
+
+export const getMasterplanDb = async (): Promise<Knex> => {
+    if (masterplanDb) return masterplanDb;
+    if (!masterplanInitPromise) {
+        masterplanInitPromise = (async () => {
+            const dbName = process.env.MASTERPLAN_DB_NAME;
+            if (!dbName) {
+                throw new Error(
+                    "[MASTERPLAN] MASTERPLAN_DB_NAME is not set — cannot connect to the Masterplan database. " +
+                        "Set it in .env to the name of the Masterplan PostgreSQL database on the same server.",
+                );
+            }
+            const instance = knex({
+                client: "pg",
+                connection: {
+                    host: process.env.PG_HOST || "localhost",
+                    port: parseInt(process.env.PG_PORT || "5432", 10),
+                    database: dbName,
+                    user: process.env.PG_USER || "postgres",
+                    password: process.env.PG_PASSWORD || "",
+                },
+                pool: { min: 0, max: 5 },
+            });
+            // Verify connectivity immediately rather than failing silently on
+            // the first real query. If the DB is unreachable we log a clear
+            // warning but don't crash the server — lock checks will just
+            // default to unlocked (fail open) until it becomes reachable.
+            try {
+                await instance.raw("SELECT 1");
+                console.log(
+                    `[MASTERPLAN] Connected to Masterplan database "${dbName}" on ${process.env.PG_HOST || "localhost"}`,
+                );
+            } catch (err: any) {
+                console.error(
+                    `[MASTERPLAN] Could not connect to Masterplan database "${dbName}": ${err.message}. ` +
+                        "Lock checks will default to unlocked until the connection is restored.",
+                );
+            }
+            masterplanDb = instance;
+            return instance;
+        })();
+    }
+    return masterplanInitPromise;
+};
+
 export async function insertGetId<T extends Record<string, any>>(
     targetDb: Knex,
     table: string,

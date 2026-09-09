@@ -9,7 +9,7 @@ jest.mock("fs", () => {
 import request from "supertest";
 import express from "express";
 import workstationRoutes from "../../routes/workstations";
-import { getDb } from "../../config/database";
+import { getDb, getMasterplanDb } from "../../config/database";
 import {
     handleOrderUpdate,
     importDocument,
@@ -158,18 +158,25 @@ describe("Workstation API Integration", () => {
     });
 
     describe("GET /workstations/search-pbom", () => {
-        it("should return 200 with search results", async () => {
+        it("should return 200 with search results annotated with locked=false", async () => {
             const mockResults = [
                 { customer_code: 0, order_code: 12345, position_code: 1 },
             ];
             (searchPbom as jest.Mock).mockResolvedValue(mockResults);
+
+            // Masterplan returns no locked rows
+            const mpChain: any = { then: (resolve: any) => resolve([]) };
+            for (const m of ["where", "select", "orWhere"]) mpChain[m] = jest.fn(() => mpChain);
+            (getMasterplanDb as jest.Mock).mockResolvedValue(jest.fn(() => mpChain));
 
             const response = await request(app)
                 .get("/workstations/search-pbom")
                 .query({ order_code: "12345" });
 
             expect(response.status).toBe(200);
-            expect(response.body).toEqual(mockResults);
+            expect(response.body).toEqual([
+                { customer_code: 0, order_code: 12345, position_code: 1, locked: false },
+            ]);
         });
 
         it("should return 400 when order_code is missing", async () => {

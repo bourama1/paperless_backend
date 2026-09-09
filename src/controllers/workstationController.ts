@@ -1,5 +1,6 @@
 import { Request, Response } from "express";
 import { getDb } from "../config/database";
+import { fetchLockedKeys } from "../services/ptlPlanService";
 import {
     handleOrderUpdate,
     OrderUpdate,
@@ -328,7 +329,25 @@ export const searchPbomHandler = async (req: Request, res: Response) => {
 
     try {
         const results = await searchPbom(order_code as string);
-        res.json(results);
+
+        // Annotate each result with lock status from Masterplan (same check
+        // as the prep queue — vyroba.tisk_zamcen=1 means the order is locked).
+        // The search tab still lets users open the document (read-only access
+        // for inspection remains useful), but shows the red lock indicator so
+        // workers know preparation is blocked before they navigate into it.
+        const lockedKeys = await fetchLockedKeys(
+            results.map((r) => ({
+                project_number: String(r.order_code),
+                position: String(r.position_code),
+            })),
+        );
+
+        const annotated = results.map((r) => ({
+            ...r,
+            locked: lockedKeys.has(`${r.order_code}::${r.position_code}`),
+        }));
+
+        res.json(annotated);
     } catch (error) {
         console.error("Error searching PBOM:", error);
         res.status(500).json({ error: "Internal server error" });

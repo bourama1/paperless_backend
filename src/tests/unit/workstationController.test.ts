@@ -35,7 +35,7 @@ import {
     renderDocument,
     saveEdited,
 } from "../../controllers/workstationController";
-import { getDb } from "../../config/database";
+import { getDb, getMasterplanDb } from "../../config/database";
 import {
     handleOrderUpdate,
     importDocument,
@@ -296,12 +296,17 @@ describe("Workstation Controller", () => {
     });
 
     describe("searchPbomHandler", () => {
-        it("should return search results", async () => {
+        it("should return search results annotated with locked=false when nothing is locked", async () => {
             mockRequest = { query: { order_code: "12345" } };
             const mockResults = [
                 { customer_code: 0, order_code: 12345, position_code: 1 },
             ];
             (searchPbom as jest.Mock).mockResolvedValue(mockResults);
+
+            // Masterplan returns no locked rows → all results annotated locked=false
+            const mpChain: any = { then: (resolve: any) => resolve([]) };
+            for (const m of ["where", "select", "orWhere"]) mpChain[m] = jest.fn(() => mpChain);
+            (getMasterplanDb as jest.Mock).mockResolvedValue(jest.fn(() => mpChain));
 
             await searchPbomHandler(
                 mockRequest as Request,
@@ -309,7 +314,9 @@ describe("Workstation Controller", () => {
             );
 
             expect(searchPbom).toHaveBeenCalledWith("12345");
-            expect(mockJson).toHaveBeenCalledWith(mockResults);
+            expect(mockJson).toHaveBeenCalledWith([
+                { customer_code: 0, order_code: 12345, position_code: 1, locked: false },
+            ]);
         });
 
         it("should return 400 if order_code is missing", async () => {

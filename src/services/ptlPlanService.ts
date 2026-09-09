@@ -33,7 +33,7 @@
 
 import fs from "fs";
 import path from "path";
-import { getDb } from "../config/database";
+import { getDb, getMasterplanDb } from "../config/database";
 
 const PTL_PLAN_FOLDER_PATH = process.env.PTL_PLAN_FOLDER_PATH || "";
 
@@ -329,7 +329,65 @@ export async function getPrepQueue(filters: PrepQueueFilters = {}) {
         query = query.andWhere("q.workplace", filters.workplace);
     }
 
-    return query.select("q.*");
+    const rows: any[] = await query.select("q.*");
+
+    // Annotate each row with a `locked` flag from the Masterplan database.
+    // Rows where vyroba.tisk_zamcen = 1 must not be processed — the
+    // physical preparation is blocked by an external decision (e.g. the
+    // planning department has locked the order for reprinting). A single
+    // batch query fetches all relevant locks so this is not N+1.
+    const lockedKeys = await fetchLockedKeys(rows);
+    return rows.map((row) => ({
+        ...row,
+        locked: lockedKeys.has(`${row.project_number}::${row.position}`),
+    }));
+}
+
+/**
+ * Queries the Masterplan database for any vyroba rows where tisk_zamcen = 1
+ * for the given queue items. Returns a Set of "projectNumber::position" keys
+ * that are locked. Fails open (empty set) if the Masterplan DB is
+ * unavailable — a connectivity hiccup should never prevent workers from
+ * seeing the queue entirely, and a locked order becoming temporarily
+ * accessible is a far less harmful failure mode than the queue going blank.
+ *
+ * Exported so the search route can reuse the same check without duplicating
+ * the Masterplan query logic.
+ */
+export async function fetchLockedKeys(
+    rows: { project_number: string; position: string }[],
+): Promise<Set<string>> {
+    if (rows.length === 0) return new Set();
+
+    try {
+        const mpDb = await getMasterplanDb();
+
+        // zak matches project_number (číslo zakázky).
+        // poz matches position — both are stored as strings in our queue
+        // and in Masterplan, so a string comparison is safe. The query
+        // uses an OR of exact (zak, poz) pairs rather than a cross-join
+        // so the index on (zak, poz) can be used if one exists.
+        const conditions = rows.map((r) => ({
+            zak: r.project_number,
+            poz: r.position,
+        }));
+
+        const locked: { zak: string; poz: string }[] = await mpDb("vyroba")
+            .where("tisk_zamcen", 1)
+            .where(function () {
+                for (const c of conditions) {
+                    this.orWhere({ zak: c.zak, poz: c.poz });
+                }
+            })
+            .select("zak", "poz");
+
+        return new Set(locked.map((r) => `${r.zak}::${r.poz}`));
+    } catch (err: any) {
+        console.error(
+            `[MASTERPLAN] Lock check failed — defaulting all items to unlocked: ${err.message}`,
+        );
+        return new Set();
+    }
 }
 
 /** Distinct workplaces currently present in the queue, for building a filter UI. */

@@ -1,5 +1,6 @@
 process.env.PTL_PLAN_FOLDER_PATH = "/tmp/ptl-plan-test";
 process.env.PTL_PLAN_RETAIN_FILES = "2";
+process.env.MASTERPLAN_DB_NAME = "Masterplan";
 
 jest.mock("../../config/database");
 jest.mock("fs", () => {
@@ -11,8 +12,8 @@ jest.mock("fs", () => {
     };
 });
 
-import { checkForNewPlan } from "../../services/ptlPlanService";
-import { getDb } from "../../config/database";
+import { checkForNewPlan, getPrepQueue } from "../../services/ptlPlanService";
+import { getDb, getMasterplanDb } from "../../config/database";
 import fs from "fs";
 
 function thenable<T>(value: T) {
@@ -134,5 +135,87 @@ describe("ptlPlanService — retention pruning", () => {
         // pruneOldPlanFiles should bail out before ever calling whereNotIn/del
         // when it finds no parseable source files to keep.
         expect(whereNotInSpy).not.toHaveBeenCalled();
+    });
+});
+
+describe("getPrepQueue — Masterplan lock annotation", () => {
+    const queueRows = [
+        { project_number: "603529", position: "050", workplace: "Hardware", quantity: 1 },
+        { project_number: "603684", position: "010", workplace: "Hardware", quantity: 2 },
+        { project_number: "604427", position: "020", workplace: "Motor",    quantity: 3 },
+    ];
+
+    function makeMainDbMock(rows: any[]) {
+        // Mimics the chained knex query used by getPrepQueue
+        const chain: any = {
+            then: (resolve: any) => resolve(rows),
+        };
+        for (const m of ["whereNotExists", "orderBy", "andWhere", "select", "where"]) {
+            chain[m] = jest.fn(() => chain);
+        }
+        return Object.assign(
+            jest.fn(() => chain),
+            { fn: { now: () => "NOW()" } },
+        );
+    }
+
+    function makeMasterplanDbMock(lockedRows: { zak: string; poz: string }[]) {
+        const chain: any = {
+            then: (resolve: any) => resolve(lockedRows),
+        };
+        for (const m of ["where", "select", "orWhere"]) {
+            chain[m] = jest.fn(() => chain);
+        }
+        return jest.fn(() => chain);
+    }
+
+    afterEach(() => jest.clearAllMocks());
+
+    it("annotates locked rows with locked=true when Masterplan reports tisk_zamcen=1", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeMainDbMock(queueRows));
+        (getMasterplanDb as jest.Mock).mockResolvedValue(
+            makeMasterplanDbMock([{ zak: "603529", poz: "050" }]),
+        );
+
+        const result = await getPrepQueue();
+
+        expect(result).toHaveLength(3);
+        expect(result.find((r: any) => r.project_number === "603529")?.locked).toBe(true);
+        expect(result.find((r: any) => r.project_number === "603684")?.locked).toBe(false);
+        expect(result.find((r: any) => r.project_number === "604427")?.locked).toBe(false);
+    });
+
+    it("marks all rows unlocked when Masterplan returns no locked rows", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeMainDbMock(queueRows));
+        (getMasterplanDb as jest.Mock).mockResolvedValue(makeMasterplanDbMock([]));
+
+        const result = await getPrepQueue();
+
+        expect(result.every((r: any) => r.locked === false)).toBe(true);
+    });
+
+    it("fails open (locked=false) when the Masterplan DB is unreachable", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeMainDbMock(queueRows));
+        (getMasterplanDb as jest.Mock).mockRejectedValue(new Error("connection refused"));
+
+        const result = await getPrepQueue();
+
+        // Connectivity failure must not surface to the user — all items
+        // appear unlocked rather than the queue going blank or erroring.
+        expect(result.every((r: any) => r.locked === false)).toBe(true);
+        expect(result).toHaveLength(3);
+    });
+
+    it("returns an empty queue without calling Masterplan when there are no items", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeMainDbMock([]));
+        const mpMock = jest.fn();
+        (getMasterplanDb as jest.Mock).mockResolvedValue(mpMock);
+
+        const result = await getPrepQueue();
+
+        expect(result).toHaveLength(0);
+        // getMasterplanDb may or may not be called, but the db query itself
+        // must not be called with an empty WHERE clause (that's a table scan).
+        expect(mpMock).not.toHaveBeenCalled();
     });
 });
