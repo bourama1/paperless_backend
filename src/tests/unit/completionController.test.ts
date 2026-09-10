@@ -58,7 +58,7 @@ describe("Completion Controller", () => {
 
             await createPrepLabel(mockRequest as Request, mockResponse as Response);
 
-            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 1);
+            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 1, null, null);
             expect(recordOrderPreparation).toHaveBeenCalledWith("P1", "10", "Jan Novak", 1);
             expect(mockSetHeader).toHaveBeenCalledWith("Content-Type", "application/pdf");
             expect(mockSend).toHaveBeenCalled();
@@ -76,7 +76,7 @@ describe("Completion Controller", () => {
 
             await createPrepLabel(mockRequest as Request, mockResponse as Response);
 
-            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 3);
+            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 3, null, null);
             expect(recordOrderPreparation).toHaveBeenCalledWith("P1", "10", "Jan Novak", 3);
         });
 
@@ -90,7 +90,7 @@ describe("Completion Controller", () => {
                 },
             };
             await createPrepLabel(mockRequest as Request, mockResponse as Response);
-            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 2);
+            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 2, null, null);
 
             jest.clearAllMocks();
             (buildPrepLabelPdf as jest.Mock).mockReturnValue(Buffer.from("%PDF-fake"));
@@ -103,7 +103,7 @@ describe("Completion Controller", () => {
                 },
             };
             await createPrepLabel(mockRequest as Request, mockResponse as Response);
-            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 1);
+            expect(buildPrepLabelPdf).toHaveBeenCalledWith("P1", "10", "Jan Novak", 1, null, null);
         });
 
         it("should return 500 with the underlying error message on failure", async () => {

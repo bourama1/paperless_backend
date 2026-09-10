@@ -59,6 +59,39 @@ export const DOCUMENTS_PRINTER_BINDING =
     (process.env.DOCUMENTS_PRINTER_BINDING || "LONGEDGE").toUpperCase() as
         | "LONGEDGE"
         | "SHORTEDGE";
+// DPI for Ghostscript rasterisation. Default 300 gives good quality for
+// PBOM/declaration documents (text + line graphics) while being ~4× faster
+// to render than the Ghostscript default of 600. Set to 600 if you need
+// photo-quality output.
+export const DOCUMENTS_PRINTER_DPI = parseInt(
+    process.env.DOCUMENTS_PRINTER_DPI || "300",
+    10,
+);
+
+// ─── Prep label printer (Godex) ───────────────────────────────────────────────
+// Separate printer config for the prep label (project number barcode, employee
+// name, etc.) — these are thermal labels on a Godex, not A4 documents on the
+// HP. The prep label PDF is rendered via Ghostscript and sent via raw TCP,
+// same pipeline as the documents printer but targeting a different machine.
+//
+//   PREP_LABEL_PRINTER_HOST    Godex IP address (empty = return PDF to mobile instead)
+//   PREP_LABEL_PRINTER_PORT    raw TCP port                 (default: 9100)
+//   PREP_LABEL_PRINTER_DEVICE  gs output device             (default: pxlmono)
+//   PREP_LABEL_PRINTER_DPI     render resolution            (default: 203)
+//     203 DPI matches most Godex thermal printers' native resolution.
+//     Use 300 if your model is 300 DPI (check Godex spec sheet).
+
+export const PREP_LABEL_PRINTER_HOST = process.env.PREP_LABEL_PRINTER_HOST || "";
+export const PREP_LABEL_PRINTER_PORT = parseInt(
+    process.env.PREP_LABEL_PRINTER_PORT || "9100",
+    10,
+);
+export const PREP_LABEL_PRINTER_DEVICE =
+    process.env.PREP_LABEL_PRINTER_DEVICE || "pxlmono";
+export const PREP_LABEL_PRINTER_DPI = parseInt(
+    process.env.PREP_LABEL_PRINTER_DPI || "203",
+    10,
+);
 
 /**
  * Prepends duplex instructions to a rendered printer-language job buffer.
@@ -136,6 +169,7 @@ export async function renderPdfForPrinter(pdfPath: string): Promise<Buffer> {
         "-dNOPAUSE",
         "-dQUIET",
         `-sDEVICE=${DOCUMENTS_PRINTER_DEVICE}`,
+        `-r${DOCUMENTS_PRINTER_DPI}`,   // resolution — lower = faster render, same print quality for text/graphics
         "-sOutputFile=-", // stream to stdout instead of writing a file
     ];
 
@@ -198,6 +232,80 @@ export async function printPdfFile(pdfPath: string): Promise<void> {
         DOCUMENTS_PRINTER_BINDING,
     );
     await sendToDocumentsPrinter(withDuplex);
+}
+
+/**
+ * Renders an in-memory PDF buffer and sends it to the prep label Godex
+ * printer (PREP_LABEL_PRINTER_HOST). Used for the prep label (project number
+ * barcode, employee name, etc.) which is a different physical printer from the
+ * A4 documents printer.
+ *
+ * The buffer is written to a temp file so Ghostscript can read it (gs only
+ * accepts file paths, not stdin). The temp file is cleaned up afterward
+ * regardless of success or failure.
+ *
+ * Returns true if the label was sent to the printer, false if
+ * PREP_LABEL_PRINTER_HOST is not configured (callers can then decide whether
+ * to fall back to returning the PDF to the mobile app instead).
+ */
+export async function printPrepLabelBuffer(pdfBuffer: Buffer): Promise<boolean> {
+    if (!PREP_LABEL_PRINTER_HOST) {
+        return false;
+    }
+
+    const os = await import("os");
+    const tmpPath = path.join(
+        os.tmpdir(),
+        `prep_label_${Date.now()}_${Math.random().toString(36).slice(2)}.pdf`,
+    );
+
+    try {
+        fs.writeFileSync(tmpPath, pdfBuffer);
+
+        const { execFile } = await import("child_process");
+        const { promisify } = await import("util");
+        const execFileAsync = promisify(execFile);
+
+        const rendered: Buffer = await (async () => {
+            const args = [
+                "-dBATCH",
+                "-dNOPAUSE",
+                "-dQUIET",
+                `-sDEVICE=${PREP_LABEL_PRINTER_DEVICE}`,
+                `-r${PREP_LABEL_PRINTER_DPI}`,
+                "-sOutputFile=-",
+                tmpPath,
+            ];
+            const { stdout } = await execFileAsync(GHOSTSCRIPT_BIN, args, {
+                timeout: 60_000,
+                encoding: "buffer" as any,
+                maxBuffer: 1024 * 1024 * 50,
+            });
+            return stdout as unknown as Buffer;
+        })();
+
+        await new Promise<void>((resolve, reject) => {
+            const socket = new net.Socket();
+            socket.connect(PREP_LABEL_PRINTER_PORT, PREP_LABEL_PRINTER_HOST, () => {
+                socket.write(rendered, (err?: Error | null) => {
+                    if (err) { socket.destroy(); reject(err); }
+                    else { socket.end(); resolve(); }
+                });
+            });
+            socket.on("error", (err: Error) => { socket.destroy(); reject(err); });
+            socket.setTimeout(15000, () => {
+                socket.destroy();
+                reject(new Error("Prep label printer timed out"));
+            });
+        });
+
+        console.log(
+            `[PREP] Sent prep label to Godex at ${PREP_LABEL_PRINTER_HOST}:${PREP_LABEL_PRINTER_PORT}`,
+        );
+        return true;
+    } finally {
+        fs.unlink(tmpPath, () => {});
+    }
 }
 
 // ─── PNG → one-page PDF ─────────────────────────────────────────────────────
@@ -541,6 +649,8 @@ export function buildPrepLabelPdf(
     position: string,
     employeeName: string,
     totalCycles: number = 1,
+    salesOrder: string | null = null,
+    productionOrderNumber: string | null = null,
 ): Buffer {
     const now = new Date();
     const dateStr = now.toLocaleDateString("cs-CZ");
@@ -566,27 +676,51 @@ export function buildPrepLabelPdf(
             );
         }
     }
-    const barcodeOps = buildBarcodeOps(barcodeFont, projectNumber);
+    // Use the production order number in the barcode when available (it's
+    // what warehouse scanners read to identify the physical job). Fall back
+    // to the project number if the Norms lookup didn't find a match.
+    const barcodeValue = productionOrderNumber || projectNumber;
+    const barcodeOps = buildBarcodeOps(barcodeFont, barcodeValue);
 
     // y values are measured from the TOP of the label here and converted to
     // PDF user space (origin bottom-left) at emit time.
     function pageContentOps(cycleIndex: number): string {
         const lines: { text: string; size: number; y: number; bold?: boolean }[] = [
-            { text: "OBJEDNAVKA", size: 13, y: 30, bold: true },
-            { text: projectNumber, size: 30, y: 66, bold: true },
-            { text: "POZICE", size: 13, y: 102, bold: true },
-            { text: position, size: 30, y: 138, bold: true },
-            { text: `Pripravil: ${employeeName}`, size: 12, y: 264 },
-            { text: `${dateStr} ${timeStr}`, size: 10, y: 282 },
+            { text: "ZAK\xc1ZKA", size: 10, y: 22 },
+            { text: projectNumber, size: 22, y: 46, bold: true },
         ];
-        // Only show the cycle/box counter when there's more than one box —
-        // a single-box order's label stays exactly as it was before.
-        if (pageCount > 1) {
+
+        if (salesOrder) {
             lines.push(
-                { text: "BALENI", size: 13, y: 312, bold: true },
-                { text: `${cycleIndex}/${pageCount}`, size: 24, y: 344, bold: true },
+                { text: "PRODEJN\xcd OBJ.", size: 10, y: 76 },
+                { text: salesOrder, size: 18, y: 98, bold: true },
             );
         }
+
+        const posYLabel = salesOrder ? 122 : 76;
+        const posYVal = salesOrder ? 146 : 98;
+        lines.push(
+            { text: "POZICE", size: 10, y: posYLabel },
+            { text: position, size: 22, y: posYVal, bold: true },
+        );
+
+        if (productionOrderNumber) {
+            // intentionally empty — the number is already encoded in the
+            // barcode and printed as the human-readable line beneath it
+        }
+
+        lines.push(
+            { text: `Pripravil: ${employeeName}`, size: 10, y: 264 },
+            { text: `${dateStr} ${timeStr}`, size: 9, y: 279 },
+        );
+
+        if (pageCount > 1) {
+            lines.push(
+                { text: "BALEN\xcd", size: 10, y: 295 },
+                { text: `${cycleIndex}/${pageCount}`, size: 20, y: 318, bold: true },
+            );
+        }
+
         return lines
             .map(
                 (l) =>

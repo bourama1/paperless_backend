@@ -5,6 +5,7 @@ import os from "os";
 import crypto from "crypto";
 import { getDb } from "../config/database";
 import { handleLabelPrinting, normalizeWorkplace } from "./labelPrintingService";
+import { checkMotorOrderForAutoFinish } from "./motorOrderService";
 import {
     DOCUMENT_TYPES,
     BOM_DOCUMENT_TYPES,
@@ -14,7 +15,12 @@ import {
 import {
     DOCUMENTS_PRINTER_HOST,
     DOCUMENTS_PRINTER_PORT,
-    printPdfFile,
+    DOCUMENTS_PRINTER_DEVICE,
+    DOCUMENTS_PRINTER_DUPLEX,
+    DOCUMENTS_PRINTER_BINDING,
+    renderPdfForPrinter,
+    applyDuplexToBuffer,
+    sendToDocumentsPrinter,
 } from "./documentPrinterService";
 
 const WORKSTATIONS_API_URL =
@@ -317,6 +323,22 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
             printDocumentsForOrder(update.order).catch((err) =>
                 console.error("Error printing documents:", err),
             );
+
+            // For Motor orders: check whether this is a "special" non-PTL
+            // order (no items in parts.xlsx). If so, emit a synthetic FINISHED
+            // event immediately so the order appears on the completion kiosk —
+            // the production system won't send a FINISHED for these orders.
+            if (normalizeWorkplace(update.order.workplace) === "motor") {
+                checkMotorOrderForAutoFinish(update)
+                    .then(async (syntheticFinish) => {
+                        if (syntheticFinish) {
+                            await handleOrderUpdate(syntheticFinish);
+                        }
+                    })
+                    .catch((err) =>
+                        console.error("[MOTOR] Error in auto-finish check:", err),
+                    );
+            }
         }
 
         // Trigger label printing (filtered by LABEL_PRINT_TRIGGER inside)
@@ -406,19 +428,26 @@ async function printDocumentsForOrder(order: OrderUpdate["order"]) {
     }
 
     try {
-        const docsToPrint: string[] = [];
-
+        // Fetch all document types in parallel — they are independent HTTP
+        // calls to doc_manager, each resolving independently (200 or 404).
+        // The original sequential loop added one full round-trip per type
+        // even for types that 404 immediately; parallelising these shaves
+        // 1–3 seconds off the total depending on doc_manager latency.
         const typesCsv = process.env.DOCUMENTS_TYPES || "14,4,5,21";
         const typeIds = typesCsv
             .split(",")
             .map((s) => parseInt(s.trim(), 10))
             .filter((n) => !isNaN(n));
 
-        for (const typeId of typeIds) {
-            const docs = await fetchDocumentsByType(order, orderCode, typeId);
-            docsToPrint.push(...docs);
-            console.log(`Found ${docs.length} documents of type ${typeId}`);
-        }
+        const fetchResults = await Promise.all(
+            typeIds.map((typeId) => fetchDocumentsByType(order, orderCode, typeId)),
+        );
+
+        const docsToPrint: string[] = fetchResults.flat();
+
+        fetchResults.forEach((docs, i) =>
+            console.log(`Found ${docs.length} documents of type ${typeIds[i]}`),
+        );
 
         if (docsToPrint.length === 0) {
             // Nothing found yet (documents may not be generated at this
@@ -742,12 +771,38 @@ async function triggerPrinting(
         `[PRINT] Printing ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}) to ${DOCUMENTS_PRINTER_HOST}:${DOCUMENTS_PRINTER_PORT}:`,
     );
 
-    for (const fp of filePaths) {
+    // Render all PDFs via Ghostscript in parallel, then send them to the
+    // printer sequentially. Rendering is CPU-bound and each file is
+    // independent; sending must be sequential because the printer's raw
+    // TCP port processes one job at a time. This avoids the previous
+    // render-send-render-send staircase where each GS process waited for
+    // the previous TCP send to complete first.
+    const rendered: Array<{ path: string; data: Buffer } | { path: string; error: string }> =
+        await Promise.all(
+            filePaths.map(async (fp) => {
+                try {
+                    const data = await renderPdfForPrinter(fp);
+                    const withDuplex = applyDuplexToBuffer(
+                        data,
+                        DOCUMENTS_PRINTER_DEVICE,
+                        DOCUMENTS_PRINTER_DUPLEX,
+                        DOCUMENTS_PRINTER_BINDING,
+                    );
+                    return { path: fp, data: withDuplex };
+                } catch (err: any) {
+                    console.error(`[PRINT] Failed to render ${fp}: ${err.message}`);
+                    return { path: fp, error: err.message };
+                }
+            }),
+        );
+
+    for (const result of rendered) {
+        if ("error" in result) continue;
         try {
-            await printPdfFile(fp);
-            console.log(`  - printed ${fp}`);
+            await sendToDocumentsPrinter(result.data);
+            console.log(`  - printed ${result.path}`);
         } catch (err: any) {
-            console.error(`[PRINT] Failed to print ${fp}: ${err.message}`);
+            console.error(`[PRINT] Failed to send ${result.path} to printer: ${err.message}`);
         }
     }
     cleanup();

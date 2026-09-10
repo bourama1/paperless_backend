@@ -8,7 +8,76 @@ import {
     isValidCompletionStatus,
     isValidCheckStatus,
 } from "../services/completionService";
-import { buildPrepLabelPdf } from "../services/documentPrinterService";
+import { buildPrepLabelPdf, printPrepLabelBuffer } from "../services/documentPrinterService";
+import { getDb, getNormsDb } from "../config/database";
+
+/**
+ * Looks up the sales order number from ptl_prep_queue using project number
+ * + position — avoids needing the mobile app to pass it through route params.
+ * Returns null if not found (order not in the plan, or plan was pruned).
+ */
+async function lookupSalesOrder(
+    projectNumber: string,
+    position: string,
+): Promise<string | null> {
+    try {
+        const db = await getDb();
+        const row = await db("ptl_prep_queue")
+            .where({ project_number: projectNumber, position })
+            .select("sales_order")
+            .first();
+        return row?.sales_order ?? null;
+    } catch (err: any) {
+        console.error(
+            `[PREP] Could not look up sales order for ${projectNumber}/${position}: ${err.message}`,
+        );
+        return null;
+    }
+}
+
+/**
+ * Looks up the production order number (vyr_obj) for a given order from the
+ * Norms database. Path: txtfiles (zakazka + prodejni_objednavka + pozice)
+ * → konfiguratory (id_txtfile + nazev LIKE '%hardware%' → vyr_obj).
+ * The nazev filter is required because each txtfile row has multiple
+ * konfiguratory rows for different parts (motor, hardware, etc.) — only
+ * the Hardware row is relevant here. Returns null and fails open if the
+ * Norms DB is unavailable or no row is found — the label still prints, just
+ * without the production order barcode.
+ */
+async function lookupProductionOrderNumber(
+    projectNumber: string,
+    salesOrder: string,
+    position: string,
+): Promise<string | null> {
+    try {
+        const db = await getNormsDb();
+
+        const txtfile = await db("txtfiles")
+            .where({
+                zakazka: projectNumber,
+                prodejni_objednavka: salesOrder,
+                pozice: position,
+            })
+            .select("id")
+            .first();
+
+        if (!txtfile?.id) return null;
+
+        const konfig = await db("konfiguratory")
+            .where({ id_txtfile: txtfile.id })
+            .whereRaw("LOWER(nazev) LIKE '%hardware%'")
+            .select("vyr_obj")
+            .first();
+
+        return konfig?.vyr_obj ? String(konfig.vyr_obj) : null;
+    } catch (err: any) {
+        console.error(
+            `[NORMS] Could not look up production order for ${projectNumber}/${position}: ${err.message}`,
+        );
+        return null;
+    }
+}
 
 export const getEmployees = async (req: Request, res: Response) => {
     try {
@@ -88,14 +157,19 @@ export const createPrepLabel = async (req: Request, res: Response) => {
         });
     }
 
-    // totalCycles comes from the prep queue's plan quantity (see
-    // ptl_prep_queue.quantity / prep-queue.tsx) — how many boxes/cycles
-    // this order/position has. Defaults to 1 for a single-box order, or
-    // when printed from a context that doesn't know the quantity.
     const cycles =
         typeof totalCycles === "number" && totalCycles > 0 ?
             Math.floor(totalCycles)
         :   1;
+
+    // Look up both sales order and production order number on the backend —
+    // the mobile app doesn't need to carry either through route params.
+    // Both fail open: if unavailable the label still prints, just without
+    // those fields.
+    const salesOrder = await lookupSalesOrder(projectNumber, position);
+    const productionOrderNumber = salesOrder
+        ? await lookupProductionOrderNumber(projectNumber, salesOrder, position)
+        : null;
 
     try {
         const pdfBuffer = buildPrepLabelPdf(
@@ -103,15 +177,29 @@ export const createPrepLabel = async (req: Request, res: Response) => {
             position,
             employeeName,
             cycles,
+            salesOrder ?? null,
+            productionOrderNumber,
         );
         await recordOrderPreparation(projectNumber, position, employeeName, cycles);
 
-        res.setHeader("Content-Type", "application/pdf");
-        res.setHeader(
-            "Content-Disposition",
-            `attachment; filename="label_${projectNumber}_${position}.pdf"`,
-        );
-        res.send(pdfBuffer);
+        // Try to send directly to the Godex prep label printer.
+        // If PREP_LABEL_PRINTER_HOST is configured, the backend prints it and
+        // returns a simple JSON success so the mobile app shows a confirmation.
+        // If not configured, fall back to returning the PDF bytes so the mobile
+        // app can open the system share sheet (previous behaviour — useful for
+        // dev/test or if the printer isn't set up yet).
+        const sentToPrinter = await printPrepLabelBuffer(pdfBuffer);
+
+        if (sentToPrinter) {
+            res.json({ success: true });
+        } else {
+            res.setHeader("Content-Type", "application/pdf");
+            res.setHeader(
+                "Content-Disposition",
+                `attachment; filename="label_${projectNumber}_${position}.pdf"`,
+            );
+            res.send(pdfBuffer);
+        }
     } catch (error: any) {
         console.error("Error generating prep label:", error);
         res.status(500).json({

@@ -57,30 +57,64 @@ import prepQueueRoutes from "./routes/prepQueue";
 
 const app = express();
 
-// TLS is optional so local/dev setups can keep running over plain HTTP.
-// In any environment reachable over an untrusted network (e.g. the Toors
-// WiFi, which can't be isolated to its own VLAN), both SSL_CERT_PATH and
-// SSL_KEY_PATH must be set.
+// TLS — three supported modes, checked in order:
+//
+//  1. PFX/PKCS#12 (SSL_PFX_PATH + optional SSL_PFX_PASSPHRASE)
+//     Export from IIS: right-click cert in IIS Manager → Export → save as .pfx.
+//     This is the easiest path when the cert was installed via IIS.
+//
+//  2. Separate PEM files (SSL_CERT_PATH + SSL_KEY_PATH)
+//     Split a .pfx with:
+//       openssl pkcs12 -in cert.pfx -nokeys -out server.crt -nodes
+//       openssl pkcs12 -in cert.pfx -nocerts -out server.key -nodes
+//
+//  3. No TLS — plain HTTP fallback (dev/test only).
+//
+// When using a publicly trusted cert (e.g. Sectigo via IIS), no certificate
+// bundling is needed in the mobile app — Android and all browsers already
+// trust the issuing CA out of the box.
+
+const SSL_PFX_PATH = process.env.SSL_PFX_PATH;
+const SSL_PFX_PASSPHRASE = process.env.SSL_PFX_PASSPHRASE || "";
 const SSL_CERT_PATH = process.env.SSL_CERT_PATH;
 const SSL_KEY_PATH = process.env.SSL_KEY_PATH;
-const useTls = Boolean(SSL_CERT_PATH && SSL_KEY_PATH);
+
+function buildTlsOptions(): import("https").ServerOptions | null {
+    if (SSL_PFX_PATH) {
+        if (!fs.existsSync(SSL_PFX_PATH)) {
+            if (process.env.NODE_ENV === "test") return null; // cert won't exist on dev machines
+            throw new Error(`[SERVER] SSL_PFX_PATH is set but file not found: ${SSL_PFX_PATH}`);
+        }
+        return {
+            pfx: fs.readFileSync(SSL_PFX_PATH),
+            passphrase: SSL_PFX_PASSPHRASE || undefined,
+        };
+    }
+    if (SSL_CERT_PATH && SSL_KEY_PATH) {
+        return {
+            cert: fs.readFileSync(SSL_CERT_PATH),
+            key: fs.readFileSync(SSL_KEY_PATH),
+        };
+    }
+    return null;
+}
+
+const tlsOptions = buildTlsOptions();
+const useTls = tlsOptions !== null;
 
 const httpServer = useTls
-    ? createHttpsServer(
-          {
-              cert: fs.readFileSync(SSL_CERT_PATH as string),
-              key: fs.readFileSync(SSL_KEY_PATH as string),
-          },
-          app,
-      )
+    ? createHttpsServer(tlsOptions!, app)
     : createServer(app);
 
 if (!useTls && process.env.NODE_ENV !== "test") {
     logger.warn(
         "SERVER",
-        "SSL_CERT_PATH/SSL_KEY_PATH not set — running plain HTTP. " +
-            "Do not use this over an untrusted network (see README).",
+        "No TLS cert configured (SSL_PFX_PATH or SSL_CERT_PATH+SSL_KEY_PATH) — " +
+            "running plain HTTP. Do not use this over an untrusted network.",
     );
+} else if (useTls) {
+    const mode = SSL_PFX_PATH ? "PFX" : "PEM";
+    logger.info("SERVER", `TLS enabled (${mode})`);
 }
 
 const io = new Server(httpServer, {

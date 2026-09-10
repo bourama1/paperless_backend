@@ -55,6 +55,53 @@ export const getMasterplanDb = async (): Promise<Knex> => {
     return masterplanInitPromise;
 };
 
+// ─── Norms DB (read-only, same server) ───────────────────────────────────────
+// Used to look up production order numbers (vyr_obj) for prep labels.
+// Query path: txtfiles (zakazka + prodejni_objednavka + pozice → id)
+//           → konfiguratory (id_txtfile → vyr_obj)
+let normsDb: Knex | null = null;
+let normsInitPromise: Promise<Knex> | null = null;
+
+export const getNormsDb = async (): Promise<Knex> => {
+    if (normsDb) return normsDb;
+    if (!normsInitPromise) {
+        normsInitPromise = (async () => {
+            const dbName = process.env.NORMS_DB_NAME;
+            if (!dbName) {
+                throw new Error(
+                    "[NORMS] NORMS_DB_NAME is not set — cannot look up production order numbers. " +
+                        "Set it in .env to the name of the Norms PostgreSQL database on the same server.",
+                );
+            }
+            const instance = knex({
+                client: "pg",
+                connection: {
+                    host: process.env.PG_HOST || "localhost",
+                    port: parseInt(process.env.PG_PORT || "5432", 10),
+                    database: dbName,
+                    user: process.env.PG_USER || "postgres",
+                    password: process.env.PG_PASSWORD || "",
+                },
+                pool: { min: 0, max: 5 },
+            });
+            try {
+                await instance.raw("SELECT 1");
+                console.log(
+                    `[NORMS] Connected to Norms database "${dbName}" on ${process.env.PG_HOST || "localhost"}`,
+                );
+            } catch (err: any) {
+                console.error(
+                    `[NORMS] Could not connect to Norms database "${dbName}": ${err.message}. ` +
+                        "Production order numbers will be omitted from prep labels until the connection is restored.",
+                );
+            }
+            normsDb = instance;
+            return instance;
+        })();
+    }
+    return normsInitPromise;
+};
+
 export async function insertGetId<T extends Record<string, any>>(
     targetDb: Knex,
     table: string,

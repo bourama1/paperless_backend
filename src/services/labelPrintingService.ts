@@ -152,8 +152,32 @@ function resolveTypeFilter(
 }
 
 // ─── env ─────────────────────────────────────────────────────────────────────
+//
+// Per-workplace trigger and printer overrides.
+//
+// LABEL_PRINT_TRIGGER   Global default: which action fires label printing.
+//                       STARTED | FINISHED               (default: STARTED)
+//
+// Per-workplace overrides follow the pattern:
+//   LABEL_TRIGGER_<WORKPLACE>   e.g. LABEL_TRIGGER_HARDWARE=FINISHED
+//   LABEL_PRINTER_UNC_<WORKPLACE>   e.g. LABEL_PRINTER_UNC_MOTOR=\\server\MotorGodex
+//   LABEL_PRINTER_HOST_<WORKPLACE>  e.g. LABEL_PRINTER_HOST_MOTOR=10.110.10.50
+//   LABEL_PRINTER_PORT_<WORKPLACE>  e.g. LABEL_PRINTER_PORT_MOTOR=9100
+//
+// Workplace names in env vars are UPPERCASED, spaces replaced with _.
+// If a per-workplace var is not set, the global value is used.
 
 const LABEL_PRINT_TRIGGER = process.env.LABEL_PRINT_TRIGGER || "STARTED";
+
+/**
+ * Returns the print trigger (STARTED | FINISHED) for a given workplace,
+ * falling back to the global LABEL_PRINT_TRIGGER.
+ */
+function getTriggerForWorkplace(workplace: string): string {
+    const key = `LABEL_TRIGGER_${workplace.toUpperCase().replace(/\s+/g, "_")}`;
+    return process.env[key] || LABEL_PRINT_TRIGGER;
+}
+
 const PRINTER_HOST = process.env.LABEL_PRINTER_HOST || "";
 const PRINTER_PORT = parseInt(process.env.LABEL_PRINTER_PORT || "9100", 10);
 const COPIES_OVERRIDE = process.env.LABEL_PRINTER_COPIES
@@ -728,9 +752,12 @@ const PRINTER_UNC_PATH = process.env.LABEL_PRINTER_UNC_PATH || ""; // e.g. \\toc
 
 /**
  * Sends the EZPL buffer to the printer via the same UNC copy command the
- * Excel macro uses:  copy /b file.prn \\tocz2420311\GodexEZ2250i
+ * Excel macro uses:  copy /b file.prn \\server\printer
  */
-async function sendViaWindowsCopy(ezplData: Buffer): Promise<void> {
+async function sendViaWindowsCopyTo(
+    ezplData: Buffer,
+    uncPath: string,
+): Promise<void> {
     const { execFile } = await import("child_process");
     const { promisify } = await import("util");
     const os = await import("os");
@@ -744,7 +771,7 @@ async function sendViaWindowsCopy(ezplData: Buffer): Promise<void> {
 
     try {
         // /b = binary copy, exactly as the VBA macro does
-        const cmd = `copy /b "${tmpFile}" "${PRINTER_UNC_PATH}"`;
+        const cmd = `copy /b "${tmpFile}" "${uncPath}"`;
         console.log(`[LABELS] cmd.exe /c ${cmd}`);
         const { stdout, stderr } = await execFileAsync("cmd.exe", ["/c", cmd]);
         if (stderr && stderr.trim())
@@ -760,10 +787,14 @@ async function sendViaWindowsCopy(ezplData: Buffer): Promise<void> {
  * Sends the EZPL buffer via raw TCP socket to the printer's own IP (port 9100).
  * Fallback method if LABEL_PRINTER_UNC_PATH is not configured.
  */
-function sendViaTcp(ezplData: Buffer): Promise<void> {
+function sendViaTcp(
+    ezplData: Buffer,
+    host: string,
+    port: number,
+): Promise<void> {
     return new Promise((resolve, reject) => {
         const socket = new net.Socket();
-        socket.connect(PRINTER_PORT, PRINTER_HOST, () => {
+        socket.connect(port, host, () => {
             socket.write(ezplData, (err) => {
                 if (err) {
                     socket.destroy();
@@ -786,18 +817,45 @@ function sendViaTcp(ezplData: Buffer): Promise<void> {
 }
 
 /**
- * Dispatches to whichever printer method is configured.
- * UNC copy (matches Excel exactly) takes priority if LABEL_PRINTER_UNC_PATH is set.
+ * Resolves the printer UNC path or TCP host for a given workplace.
+ * Checks LABEL_PRINTER_UNC_<WORKPLACE> / LABEL_PRINTER_HOST_<WORKPLACE>
+ * first, then falls back to the global LABEL_PRINTER_UNC_PATH / LABEL_PRINTER_HOST.
  */
-async function sendToLabelPrinter(ezplData: Buffer): Promise<void> {
-    if (PRINTER_UNC_PATH) {
-        return sendViaWindowsCopy(ezplData);
+function resolveWorkplacePrinter(workplace: string): {
+    uncPath: string;
+    host: string;
+    port: number;
+} {
+    const key = workplace.toUpperCase().replace(/\s+/g, "_");
+    const uncPath =
+        process.env[`LABEL_PRINTER_UNC_${key}`] || PRINTER_UNC_PATH;
+    const host =
+        process.env[`LABEL_PRINTER_HOST_${key}`] || PRINTER_HOST;
+    const port = process.env[`LABEL_PRINTER_PORT_${key}`]
+        ? parseInt(process.env[`LABEL_PRINTER_PORT_${key}`]!, 10)
+        : PRINTER_PORT;
+    return { uncPath, host, port };
+}
+
+/**
+ * Dispatches to whichever printer method is configured for this workplace.
+ * Per-workplace UNC/host vars take priority over the global defaults.
+ * UNC copy (matches Excel exactly) takes priority over raw TCP.
+ */
+async function sendToLabelPrinter(
+    ezplData: Buffer,
+    workplace: string,
+): Promise<void> {
+    const { uncPath, host, port } = resolveWorkplacePrinter(workplace);
+    if (uncPath) {
+        return sendViaWindowsCopyTo(ezplData, uncPath);
     }
-    if (PRINTER_HOST) {
-        return sendViaTcp(ezplData);
+    if (host) {
+        return sendViaTcp(ezplData, host, port);
     }
     console.warn(
-        "[LABELS] Neither LABEL_PRINTER_UNC_PATH nor LABEL_PRINTER_HOST set – skipping print",
+        `[LABELS] No printer configured for workplace "${workplace}" ` +
+            "(LABEL_PRINTER_UNC_PATH / LABEL_PRINTER_HOST not set) – skipping print",
     );
 }
 
@@ -997,9 +1055,10 @@ export function selectMotorBatchRows(
 // ─── main export ─────────────────────────────────────────────────────────────
 
 export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
-    if (update.action !== LABEL_PRINT_TRIGGER) {
+    const workplaceTrigger = getTriggerForWorkplace(update.order.workplace);
+    if (update.action !== workplaceTrigger) {
         console.log(
-            `[LABELS] action=${update.action} – not trigger (${LABEL_PRINT_TRIGGER}), skip`,
+            `[LABELS] action=${update.action} – trigger for "${update.order.workplace}" is "${workplaceTrigger}", skip`,
         );
         return;
     }
@@ -1139,7 +1198,8 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
             const config = resolveConfig(row.labelType);
             const copies = COPIES_OVERRIDE ?? entry.copies ?? config.copies;
 
-            const printerConfigured = !!(PRINTER_UNC_PATH || PRINTER_HOST);
+            const { uncPath: wpUnc, host: wpHost } = resolveWorkplacePrinter(order.workplace);
+            const printerConfigured = !!(wpUnc || wpHost);
 
             try {
                 const ezplData = generateEzpl(row, config.template);
@@ -1152,7 +1212,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                     );
                 } else {
                     for (let i = 0; i < copies; i++) {
-                        await sendToLabelPrinter(ezplData);
+                        await sendToLabelPrinter(ezplData, order.workplace);
                     }
                 }
 
