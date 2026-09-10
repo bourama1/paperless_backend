@@ -1,4 +1,4 @@
-import { buildPrepLabelPdf } from "../../services/documentPrinterService";
+import { buildPrepLabelPdf, applyDuplexToBuffer } from "../../services/documentPrinterService";
 import {
     code39Geometry,
     code39VectorOps,
@@ -135,5 +135,80 @@ describe("code39 vector encoding", () => {
         expect(sanitizeCode39("ěščřžýáíé")).toBe("---------");
         expect(sanitizeCode39("")).toBe("");
         expect(sanitizeCode39("abc$+/%. ")).toBe("ABC$+/%. ");
+    });
+});
+
+// ─── duplex buffer injection ──────────────────────────────────────────────────
+
+const FAKE_PCLXL = Buffer.from("\x1b E hello pclxl data", "ascii");
+const FAKE_PCL5  = Buffer.from("\x1b E hello pcl5 data", "ascii");
+const FAKE_PS    = Buffer.from("%!PS Adobe... data", "ascii");
+
+describe("applyDuplexToBuffer", () => {
+    describe("duplex disabled", () => {
+        it("returns the buffer unchanged regardless of device", () => {
+            for (const device of ["pxlmono", "pxlcolor", "ljet4", "ps2write"]) {
+                const result = applyDuplexToBuffer(FAKE_PCLXL, device, false, "LONGEDGE");
+                expect(result).toBe(FAKE_PCLXL); // exact same reference
+            }
+        });
+    });
+
+    describe("pxlmono (PCL-XL) duplex", () => {
+        it("prepends a PJL header with DUPLEX=ON and BINDING=LONGEDGE", () => {
+            const result = applyDuplexToBuffer(FAKE_PCLXL, "pxlmono", true, "LONGEDGE");
+            const text = result.toString("ascii");
+            expect(text).toMatch(/\x1b%-12345X/);
+            expect(text).toContain("@PJL SET DUPLEX=ON");
+            expect(text).toContain("@PJL SET BINDING=LONGEDGE");
+            expect(text).toContain("@PJL ENTER LANGUAGE=PCLXL");
+            expect(text.endsWith(FAKE_PCLXL.toString("ascii"))).toBe(true);
+        });
+
+        it("uses BINDING=SHORTEDGE when configured", () => {
+            const result = applyDuplexToBuffer(FAKE_PCLXL, "pxlmono", true, "SHORTEDGE");
+            const text = result.toString("ascii");
+            expect(text).toContain("@PJL SET BINDING=SHORTEDGE");
+        });
+
+        it("produces a longer buffer than the original (header was prepended)", () => {
+            const result = applyDuplexToBuffer(FAKE_PCLXL, "pxlmono", true, "LONGEDGE");
+            expect(result.length).toBeGreaterThan(FAKE_PCLXL.length);
+        });
+
+        it("ends with the original PCL-XL payload unchanged", () => {
+            const result = applyDuplexToBuffer(FAKE_PCLXL, "pxlmono", true, "LONGEDGE");
+            const suffix = result.slice(result.length - FAKE_PCLXL.length);
+            expect(suffix.equals(FAKE_PCLXL)).toBe(true);
+        });
+
+        it("pxlcolor uses the same PJL approach as pxlmono", () => {
+            const result = applyDuplexToBuffer(FAKE_PCLXL, "pxlcolor", true, "LONGEDGE");
+            const text = result.toString("ascii");
+            expect(text).toContain("@PJL SET DUPLEX=ON");
+            expect(text).toContain("@PJL ENTER LANGUAGE=PCLXL");
+        });
+    });
+
+    describe("ljet4 (PCL5) duplex", () => {
+        it("prepends ESC&l2S for long-edge duplex", () => {
+            const result = applyDuplexToBuffer(FAKE_PCL5, "ljet4", true, "LONGEDGE");
+            const text = result.toString("ascii");
+            expect(text.startsWith("\x1b&l2S")).toBe(true);
+            expect(text.endsWith(FAKE_PCL5.toString("ascii"))).toBe(true);
+        });
+
+        it("prepends ESC&l1S for short-edge (landscape) duplex", () => {
+            const result = applyDuplexToBuffer(FAKE_PCL5, "ljet4", true, "SHORTEDGE");
+            const text = result.toString("ascii");
+            expect(text.startsWith("\x1b&l1S")).toBe(true);
+        });
+    });
+
+    describe("ps2write (PostScript) duplex", () => {
+        it("returns the buffer unchanged — duplex is handled by gs args, not byte prepending", () => {
+            const result = applyDuplexToBuffer(FAKE_PS, "ps2write", true, "LONGEDGE");
+            expect(result).toBe(FAKE_PS);
+        });
     });
 });

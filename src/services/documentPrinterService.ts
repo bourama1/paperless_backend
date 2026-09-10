@@ -21,6 +21,11 @@
  *   DOCUMENTS_PRINTER_PORT    raw TCP port                (default: 9100)
  *   DOCUMENTS_PRINTER_DEVICE  gs output device: pxlmono | pxlcolor |
  *                             ljet4 | ps2write             (default: pxlmono)
+ *   DOCUMENTS_PRINTER_DUPLEX  "true" to print double-sided, anything else
+ *                             (or unset) for single-sided               (default: false)
+ *   DOCUMENTS_PRINTER_BINDING "LONGEDGE" (default, flip on long/left edge,
+ *                             normal portrait duplex) or "SHORTEDGE"
+ *                             (flip on short/top edge, used for landscape)
  */
 
 import fs from "fs";
@@ -48,6 +53,74 @@ export const DOCUMENTS_PRINTER_PORT = parseInt(
 );
 export const DOCUMENTS_PRINTER_DEVICE =
     process.env.DOCUMENTS_PRINTER_DEVICE || "pxlmono";
+export const DOCUMENTS_PRINTER_DUPLEX =
+    process.env.DOCUMENTS_PRINTER_DUPLEX === "true";
+export const DOCUMENTS_PRINTER_BINDING =
+    (process.env.DOCUMENTS_PRINTER_BINDING || "LONGEDGE").toUpperCase() as
+        | "LONGEDGE"
+        | "SHORTEDGE";
+
+/**
+ * Prepends duplex instructions to a rendered printer-language job buffer.
+ *
+ * Duplex support per printer language:
+ *
+ * pxlmono / pxlcolor (PCL-XL / PCL6, the default):
+ *   A PJL (Printer Job Language) header goes before the PCL-XL data. PJL
+ *   is a meta-language that HP-compatible printers process before handing
+ *   the rest of the stream to the page-language parser. The UEL (Universal
+ *   Exit Language) escape sequence \x1b%-12345X is the required preamble;
+ *   the printer uses it to detect that what follows is PJL rather than raw
+ *   PCL. ENTER LANGUAGE=PCLXL hands control back to the PCL-XL engine so
+ *   the actual page content prints normally.
+ *
+ * ljet4 (PCL5):
+ *   A PCL escape sequence sets the duplex mode. \x1b&l2S = duplex long-
+ *   edge, \x1b&l1S = duplex short-edge. This goes at the very start of the
+ *   stream (before any page data) and takes effect for the whole job.
+ *
+ * ps2write (PostScript):
+ *   Ghostscript can embed the duplex request directly in the render step
+ *   via -dDuplex=true and -dTumble=false/true — no byte prepending needed.
+ *   This function returns the buffer unchanged for ps2write; the calling
+ *   code adds the relevant gs args in renderPdfForPrinter() instead.
+ */
+export function applyDuplexToBuffer(
+    data: Buffer,
+    device: string,
+    duplex: boolean,
+    binding: "LONGEDGE" | "SHORTEDGE",
+): Buffer {
+    if (!duplex) return data;
+
+    const normalizedDevice = device.toLowerCase();
+
+    if (normalizedDevice === "pxlmono" || normalizedDevice === "pxlcolor") {
+        // PJL header — must be the very first bytes in the TCP stream
+        const pjlHeader = Buffer.from(
+            `\x1b%-12345X` +
+                `@PJL\n` +
+                `@PJL SET DUPLEX=ON\n` +
+                `@PJL SET BINDING=${binding}\n` +
+                `@PJL ENTER LANGUAGE=PCLXL\n`,
+            "ascii",
+        );
+        return Buffer.concat([pjlHeader, data]);
+    }
+
+    if (normalizedDevice === "ljet4") {
+        // PCL5 escape: &l2S = duplex long-edge, &l1S = duplex short-edge
+        const simplexCode = 2; // 2 = duplex long-edge (portrait flip on left)
+        const shortEdgeCode = 1; // 1 = duplex short-edge (landscape flip on top)
+        const code = binding === "SHORTEDGE" ? shortEdgeCode : simplexCode;
+        const pclDuplex = Buffer.from(`\x1b&l${code}S`, "ascii");
+        return Buffer.concat([pclDuplex, data]);
+    }
+
+    // ps2write: duplex is set as Ghostscript args in renderPdfForPrinter,
+    // not as a byte header, so there's nothing to prepend here.
+    return data;
+}
 
 /**
  * Renders a PDF into the printer's native language via Ghostscript,
@@ -64,8 +137,22 @@ export async function renderPdfForPrinter(pdfPath: string): Promise<Buffer> {
         "-dQUIET",
         `-sDEVICE=${DOCUMENTS_PRINTER_DEVICE}`,
         "-sOutputFile=-", // stream to stdout instead of writing a file
-        pdfPath,
     ];
+
+    // For PostScript output, duplex is embedded as a gs argument rather
+    // than a byte header — the other devices (pxlmono, pxlcolor, ljet4)
+    // get their duplex instructions prepended to the rendered bytes later
+    // in applyDuplexToBuffer.
+    if (DOCUMENTS_PRINTER_DUPLEX && DOCUMENTS_PRINTER_DEVICE.toLowerCase() === "ps2write") {
+        args.push("-dDuplex=true");
+        args.push(
+            DOCUMENTS_PRINTER_BINDING === "SHORTEDGE"
+                ? "-dTumble=true"
+                : "-dTumble=false",
+        );
+    }
+
+    args.push(pdfPath);
 
     const { stdout } = await execFileAsync(GHOSTSCRIPT_BIN, args, {
         timeout: 120_000,
@@ -104,7 +191,13 @@ export function sendToDocumentsPrinter(data: Buffer): Promise<void> {
 /** Renders a PDF and sends it to the printer in one step. */
 export async function printPdfFile(pdfPath: string): Promise<void> {
     const rendered = await renderPdfForPrinter(pdfPath);
-    await sendToDocumentsPrinter(rendered);
+    const withDuplex = applyDuplexToBuffer(
+        rendered,
+        DOCUMENTS_PRINTER_DEVICE,
+        DOCUMENTS_PRINTER_DUPLEX,
+        DOCUMENTS_PRINTER_BINDING,
+    );
+    await sendToDocumentsPrinter(withDuplex);
 }
 
 // ─── PNG → one-page PDF ─────────────────────────────────────────────────────
