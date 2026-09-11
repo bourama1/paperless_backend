@@ -10,6 +10,7 @@ import {
 } from "../services/completionService";
 import { buildPrepLabelPdf, printPrepLabelBuffer } from "../services/documentPrinterService";
 import { getDb, getNormsDb } from "../config/database";
+import { closeOrderInToors } from "../services/toorsService";
 
 /**
  * Looks up the sales order number from ptl_prep_queue using project number
@@ -115,6 +116,7 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
         salesOrder,
         employeeName,
         status,
+        quantity,
     } = req.body;
 
     if (!orderId || !workstation || !employeeName || !status) {
@@ -141,7 +143,29 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
             employeeName,
             status,
         });
-        res.status(201).json({ status: "ok" });
+
+        // Close the order in the ERP system (TOORS) when status is "complete".
+        // Other statuses (complete_with_changes, missing_product, etc.) are
+        // intentionally skipped — only clean completions are auto-closed.
+        // Awaited so the mobile app can show the worker whether it succeeded —
+        // if TOORS is slow or down the 10s timeout keeps this bounded.
+        let toorsResult: Awaited<ReturnType<typeof closeOrderInToors>> | null = null;
+        if (status === "complete" && productOrder) {
+            const closeQty = typeof quantity === "number" && quantity > 1 ? Math.floor(quantity) : 1;
+            toorsResult = await closeOrderInToors(productOrder, closeQty);
+        }
+
+        res.status(201).json({
+            status: "ok",
+            toors: toorsResult
+                ? {
+                      success: toorsResult.success,
+                      error: toorsResult.error,
+                      detail: toorsResult.detail,
+                      status: toorsResult.status,
+                  }
+                : null,
+        });
     } catch (error) {
         console.error("Error recording order completion:", error);
         res.status(500).json({ error: "Internal server error" });

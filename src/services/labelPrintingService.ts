@@ -735,6 +735,205 @@ export function generateEzpl(label: LabelRow, template: string): Buffer {
     return Buffer.from(block + extra + "\n", "latin1");
 }
 
+// ─── ZPL generation (Zebra) ─────────────────────────────────────────────────
+//
+// Some finishing-label stations (e.g. Hardware) now have a Zebra printer
+// instead of the Godex EZ2250i, and Zebra printers only understand ZPL, not
+// EZPL — see resolveWorkplacePrinter's `lang` below for how a workplace opts
+// into this. Rather than rasterize (like the prep label does — there's no
+// PDF here to rasterize, these labels are typeset directly from CSV field
+// values), each EZPL command below is translated to its ZPL equivalent
+// command-for-command, reusing the exact same field positions/values as the
+// EZPL versions above — those dot coordinates were captured from the real
+// Godex .prn output, so this assumes the Zebra is configured at the SAME
+// DPI (LABEL_PRINTER_DPI, default 203, matches both the Godex EZ2250i and
+// the common Zebra ZD230 variant) — if not, every coordinate below would
+// need proportional rescaling, not just the pieces this file computes from
+// dpi (font sizing, barcode height, overall ^PW/^LL).
+//
+// Command mapping, from GoDEX's own EZPL Programmer's Manual (Rev.J):
+//   A<font>,x,y,xmul,ymul,gap,rot,data  (text, font A-H = 6/8/10/12/14/18/24/30pt)
+//     -> ^FO<x>,<y>^A0N,<h>,<w>^FD<data>^FS   (h/w = font points * dpi/72 * mul)
+//   BA3,x,y,narrow,wide,height,rot,readable,data  (Code 39 FULL ASCII barcode)
+//     -> ^FO<x>,<y>^BY<narrow>,<wide>^B3N,N,<height>,Y,N^FD<data>^FS
+//        (Zebra's ^B3 auto-encodes full-ASCII data, same as Godex type "A3";
+//        e=N because A3 specifically means "full ASCII, no check digit" —
+//        A2 is the checked variant, which this codebase doesn't use)
+//   Lo,x,y,x1,y1  (solid filled line/bar between two corners)
+//     -> ^FO<x>,<y>^GB<w>,<h>,<min(w,h)>^FS   (a Graphic Box filled solid by
+//        setting its border thickness to the smaller dimension)
+//
+// The bitmap fonts' declared "points" are converted to dots the same way
+// the manual's own TTF formula does (points * dpi / 72) — Godex doesn't
+// publish an exact pixel-height table for the A-H bitmap fonts, so this is
+// the best available approximation; text may need minor size tuning against
+// real printed output, but (unlike the barcodes) a few dots off doesn't
+// affect readability or scanning.
+
+const GODEX_BITMAP_FONT_POINTS: Record<string, number> = {
+    A: 6, B: 8, C: 10, D: 12, E: 14, F: 18, G: 24, H: 30,
+};
+
+function zplFontDots(fontLetter: string, dpi: number): number {
+    const points = GODEX_BITMAP_FONT_POINTS[fontLetter] ?? 10;
+    return Math.max(1, Math.round((points * dpi) / 72));
+}
+
+// ZPL uses ^ and ~ as command prefixes — strip them from field data the same
+// way ezplValue() strips EZPL's comma delimiter, rather than let stray
+// characters in a customer name/address corrupt the label format.
+function zplValue(val: string): string {
+    return val.replace(/[\^~]/g, " ");
+}
+
+function zplText(fontLetter: string, x: number, y: number, xMul: number, yMul: number, text: string, dpi: number): string {
+    if (!text) return "";
+    const base = zplFontDots(fontLetter, dpi);
+    return `^FO${x},${y}^A0N,${base * yMul},${base * xMul}^FD${zplValue(text)}^FS`;
+}
+
+function zplBarcode39(x: number, y: number, narrow: number, wide: number, height: number, data: string): string {
+    if (!data) return "";
+    return `^FO${x},${y}^BY${narrow},${wide}^B3N,N,${height},Y,N^FD${zplValue(data)}^FS`;
+}
+
+function zplLine(x1: number, y1: number, x2: number, y2: number): string {
+    const w = Math.max(1, Math.abs(x2 - x1));
+    const h = Math.max(1, Math.abs(y2 - y1));
+    return `^FO${Math.min(x1, x2)},${Math.min(y1, y2)}^GB${w},${h},${Math.min(w, h)}^FS`;
+}
+
+function zplBorders(): string {
+    return [
+        zplLine(2, 878, 793, 881),
+        zplLine(2, 870, 793, 871),
+        zplLine(2, 168, 793, 171),
+        zplLine(2, 160, 793, 161),
+        zplLine(2, 401, 793, 402),
+        zplLine(2, 330, 793, 333),
+        zplLine(2, 322, 793, 323),
+        zplLine(398, 171, 399, 322),
+        zplLine(398, 882, 399, 1033),
+        zplLine(208, 3, 209, 158),
+        zplLine(140, 332, 141, 400),
+        zplLine(3, 477, 794, 480),
+        zplLine(3, 469, 794, 470),
+        zplLine(140, 400, 141, 468),
+    ].join("\n");
+}
+
+function generateSimpleBlockZpl(label: LabelRow, dpi: number): string {
+    const pos3 = label.position.padStart(3, "0").slice(0, 3);
+    const cc = countryCode(label.deliveryCountry);
+
+    let cName1 = label.customerName;
+    if (label.customerName.includes("/")) {
+        const idx = label.customerName.indexOf("/");
+        cName1 = label.customerName.slice(0, idx + 1);
+    } else {
+        cName1 = splitLine(label.customerName, 10)[0];
+    }
+
+    const orderNum = label.orderNumber.replace(/^Z/, "");
+    const orderRef = `${orderNum}_${pos3}`;
+
+    return [
+        "^XA",
+        zplBorders(),
+        zplText("E", 22, 164, 2, 2, label.salesOrder, dpi),
+        zplText("E", 22, 233, 2, 2, pos3, dpi),
+        zplText("C", 151, 345, 1, 1, label.packageType, dpi),
+        zplText("C", 151, 413, 1, 1, label.packagePart, dpi),
+        zplText("E", 14, 598, 2, 2, "INTERNAL PURPOSE", dpi),
+        zplText("F", 7, 893, 1, 1, cName1, dpi),
+        zplText("E", 58, 38, 2, 2, cc, dpi),
+        zplText("E", 188, 685, 2, 2, orderRef, dpi),
+        "^XZ",
+    ].join("\n");
+}
+
+function generatePrimaryBlockZpl(label: LabelRow, dpi: number): string {
+    const pos3 = label.position.padStart(3, "0");
+    const custNum = padCustomerNumber(label.customerNumber);
+    const cc = countryCode(label.deliveryCountry);
+
+    const [dName1, dName2] = splitLine(label.deliveryName.toUpperCase(), 20);
+
+    let cName1 = label.customerName;
+    let cName2 = "";
+    if (label.customerName.includes("/")) {
+        const idx = label.customerName.indexOf("/");
+        cName1 = label.customerName.slice(0, idx + 1);
+        cName2 = label.customerName.slice(idx + 1);
+    } else {
+        [cName1, cName2] = splitLine(label.customerName, 10);
+    }
+
+    return [
+        "^XA",
+        zplBorders(),
+        zplBarcode39(473, 181, 1, 3, 100, label.toorsBarcode),
+        zplBarcode39(479, 893, 1, 3, 100, label.customerBarcode),
+        zplText("E", 22, 164, 2, 2, label.salesOrder, dpi),
+        zplText("E", 22, 233, 2, 2, pos3, dpi),
+        zplText("C", 151, 345, 1, 1, label.packageType, dpi),
+        ...(label.weight && label.weight !== "0"
+            ? [zplText("E", 4, 345, 1, 1, `${label.weight}kg`, dpi)]
+            : []),
+        zplText("C", 9, 491, 2, 2, dName1, dpi),
+        zplText("C", 9, 569, 2, 2, dName2, dpi),
+        zplText("B", 11, 672, 2, 2, label.deliveryAddress, dpi),
+        zplText("B", 11, 741, 2, 2, label.deliveryPostCode, dpi),
+        zplText("B", 11, 809, 2, 2, label.deliveryCountry, dpi),
+        zplText("F", 7, 893, 1, 1, cName1, dpi),
+        ...(cName2 ? [zplText("F", 7, 969, 1, 1, cName2, dpi)] : []),
+        zplText("E", 5, 414, 1, 1, custNum, dpi),
+        zplText("E", 151, 413, 1, 1, label.packagePart, dpi),
+        zplText("E", 58, 38, 2, 2, cc, dpi),
+        "^XZ",
+    ].join("\n");
+}
+
+function generateOutsideEuBlockZpl(label: LabelRow, dpi: number): string {
+    const pos3 = label.position.padStart(3, "0");
+    const cc = countryCode(label.deliveryCountry);
+
+    let cName1 = label.customerName;
+    if (label.customerName.includes("/")) {
+        const idx = label.customerName.indexOf("/");
+        cName1 = label.customerName.slice(0, idx + 1);
+    } else {
+        [cName1] = splitLine(label.customerName, 10);
+    }
+
+    return [
+        "^XA",
+        zplBorders(),
+        zplText("E", 22, 164, 2, 2, label.salesOrder, dpi),
+        zplText("E", 22, 233, 2, 2, pos3, dpi),
+        zplText("C", 151, 345, 1, 1, label.packageType, dpi),
+        zplText("E", 50, 577, 3, 3, "OUTSIDE EU", dpi),
+        zplText("B", 11, 741, 2, 2, label.countryAddress, dpi),
+        zplText("F", 7, 893, 1, 1, cName1, dpi),
+        zplText("E", 58, 38, 2, 2, cc, dpi),
+        "^XZ",
+    ].join("\n");
+}
+
+/** ZPL equivalent of generateEzpl — same template selection, same field
+ * values, translated command-for-command (see the comment block above). */
+export function generateZpl(label: LabelRow, template: string, dpi: number): Buffer {
+    const block =
+        template === "aktualniCMDinter"
+            ? generateSimpleBlockZpl(label, dpi)
+            : generatePrimaryBlockZpl(label, dpi);
+    const extra =
+        template === "aktualniCMD" && needsOutsideEuLabel(label)
+            ? "\n" + generateOutsideEuBlockZpl(label, dpi)
+            : "";
+    return Buffer.from(block + extra + "\n", "ascii");
+}
+
 // ─── printer I/O ─────────────────────────────────────────────────────
 //
 // This backend runs on Windows Server, so we can send print jobs the exact
@@ -749,6 +948,17 @@ export function generateEzpl(label: LabelRow, template: string): Buffer {
 // used only if LABEL_PRINTER_UNC_PATH is not set.
 
 const PRINTER_UNC_PATH = process.env.LABEL_PRINTER_UNC_PATH || ""; // e.g. \\tocz2420311\GodexEZ2250i
+// "ezpl" (Godex, default — preserves existing behavior for every workplace
+// that doesn't set an override) or "zpl" (Zebra, e.g. ZD230). Per-workplace
+// via LABEL_PRINTER_LANG_<WORKPLACE>, e.g. LABEL_PRINTER_LANG_HARDWARE=zpl
+// while LABEL_PRINTER_LANG_MOTOR stays unset/ezpl for a Godex Motor station.
+const PRINTER_LANG = (process.env.LABEL_PRINTER_LANG || "ezpl").toLowerCase();
+// DPI used only for the zpl path's font sizing and label ^PW/^LL — the field
+// x/y coordinates themselves are reused as-is from the Godex capture, so
+// this must match whatever DPI the Godex output was captured at (203,
+// same default as PREP_LABEL_PRINTER_DPI) for those coordinates to still
+// line up. See the ZPL generation comment block above generateZpl.
+const PRINTER_DPI = parseInt(process.env.LABEL_PRINTER_DPI || "203", 10);
 
 /**
  * Sends the EZPL buffer to the printer via the same UNC copy command the
@@ -825,6 +1035,8 @@ function resolveWorkplacePrinter(workplace: string): {
     uncPath: string;
     host: string;
     port: number;
+    lang: "ezpl" | "zpl";
+    dpi: number;
 } {
     const key = workplace.toUpperCase().replace(/\s+/g, "_");
     const uncPath =
@@ -834,7 +1046,13 @@ function resolveWorkplacePrinter(workplace: string): {
     const port = process.env[`LABEL_PRINTER_PORT_${key}`]
         ? parseInt(process.env[`LABEL_PRINTER_PORT_${key}`]!, 10)
         : PRINTER_PORT;
-    return { uncPath, host, port };
+    const lang = (
+        process.env[`LABEL_PRINTER_LANG_${key}`] || PRINTER_LANG
+    ).toLowerCase() === "zpl" ? "zpl" : "ezpl";
+    const dpi = process.env[`LABEL_PRINTER_DPI_${key}`]
+        ? parseInt(process.env[`LABEL_PRINTER_DPI_${key}`]!, 10)
+        : PRINTER_DPI;
+    return { uncPath, host, port, lang, dpi };
 }
 
 /**
@@ -1198,11 +1416,14 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
             const config = resolveConfig(row.labelType);
             const copies = COPIES_OVERRIDE ?? entry.copies ?? config.copies;
 
-            const { uncPath: wpUnc, host: wpHost } = resolveWorkplacePrinter(order.workplace);
+            const { uncPath: wpUnc, host: wpHost, lang: wpLang, dpi: wpDpi } = resolveWorkplacePrinter(order.workplace);
             const printerConfigured = !!(wpUnc || wpHost);
 
             try {
-                const ezplData = generateEzpl(row, config.template);
+                const labelData =
+                    wpLang === "zpl"
+                        ? generateZpl(row, config.template, wpDpi)
+                        : generateEzpl(row, config.template);
 
                 if (!printerConfigured) {
                     console.log(
@@ -1212,7 +1433,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                     );
                 } else {
                     for (let i = 0; i < copies; i++) {
-                        await sendToLabelPrinter(ezplData, order.workplace);
+                        await sendToLabelPrinter(labelData, order.workplace);
                     }
                 }
 

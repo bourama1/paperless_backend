@@ -85,7 +85,9 @@ interface OrderFile {
  */
 export function readOrderFile(filePath: string): OrderFile | null {
     try {
-        const raw = fs.readFileSync(filePath, "utf-8");
+        // Strip a UTF-8 BOM if present — the production system writes these
+        // order files with one (same as productionPlanPTL.json).
+        const raw = fs.readFileSync(filePath, "utf-8").replace(/^﻿/, "");
         return JSON.parse(raw) as OrderFile;
     } catch (err: any) {
         console.error(`[MOTOR] Could not read order file ${filePath}: ${err.message}`);

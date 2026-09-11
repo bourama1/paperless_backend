@@ -115,6 +115,12 @@ describe("readOrderFile", () => {
         (fs.readFileSync as jest.Mock).mockImplementation(() => { throw new Error("ENOENT"); });
         expect(readOrderFile("/some/missing.json")).toBeNull();
     });
+
+    it("strips a leading UTF-8 BOM before parsing (real order files have one)", () => {
+        (fs.readFileSync as jest.Mock).mockReturnValue("﻿" + JSON.stringify(SAMPLE_ORDER));
+        const result = readOrderFile("/some/path.json");
+        expect(result?.productOrder).toBe("230910");
+    });
 });
 
 describe("isNonPtlOrder", () => {

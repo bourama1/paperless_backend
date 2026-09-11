@@ -1,4 +1,9 @@
-import { buildPrepLabelPdf, applyDuplexToBuffer } from "../../services/documentPrinterService";
+import {
+    buildPrepLabelPdf,
+    applyDuplexToBuffer,
+    parsePbmRaw,
+    pbmRawToZplLabel,
+} from "../../services/documentPrinterService";
 import {
     code39Geometry,
     code39VectorOps,
@@ -210,5 +215,67 @@ describe("applyDuplexToBuffer", () => {
             const result = applyDuplexToBuffer(FAKE_PS, "ps2write", true, "LONGEDGE");
             expect(result).toBe(FAKE_PS);
         });
+    });
+});
+
+// ─── Zebra ZPL rendering (raster) ───────────────────────────────────────────
+
+/** Hand-builds a raw PBM (P4) buffer the same shape Ghostscript's pbmraw
+ * device would produce — magic, "width height" header, then packed 1bpp
+ * row data (MSB-first, each row padded to a whole byte). */
+function makePbmRaw(width: number, height: number, rows: number[]): Buffer {
+    return Buffer.concat([
+        Buffer.from(`P4\n${width} ${height}\n`, "ascii"),
+        Buffer.from(rows),
+    ]);
+}
+
+describe("parsePbmRaw", () => {
+    it("parses width/height and the packed pixel data", () => {
+        // 8×2 image: row1 = 11110000, row2 = 00001111
+        const pbm = makePbmRaw(8, 2, [0xf0, 0x0f]);
+        const { width, height, data } = parsePbmRaw(pbm);
+        expect(width).toBe(8);
+        expect(height).toBe(2);
+        expect(data.equals(Buffer.from([0xf0, 0x0f]))).toBe(true);
+    });
+
+    it("pads each row to a whole byte for widths not a multiple of 8", () => {
+        // 10×1 image → 2 bytes/row even though only 10 bits are meaningful
+        const pbm = makePbmRaw(10, 1, [0xff, 0xc0]);
+        const { width, height, data } = parsePbmRaw(pbm);
+        expect(width).toBe(10);
+        expect(height).toBe(1);
+        expect(data.length).toBe(2);
+    });
+
+    it("throws on a buffer that isn't a raw PBM (P4)", () => {
+        expect(() => parsePbmRaw(Buffer.from("P5\n8 2\n", "ascii"))).toThrow();
+    });
+});
+
+describe("pbmRawToZplLabel", () => {
+    it("wraps the bitmap in a ^XA...^XZ label sized via ^PW/^LL", () => {
+        const pbm = makePbmRaw(8, 2, [0xf0, 0x0f]);
+        const zpl = pbmRawToZplLabel(pbm).toString("ascii");
+
+        expect(zpl).toContain("^XA");
+        expect(zpl).toContain("^PW8");
+        expect(zpl).toContain("^LL2");
+        expect(zpl.trim().endsWith("^XZ")).toBe(true);
+    });
+
+    it("hex-encodes the packed pixel bytes directly into ^GFA (same bit convention, no inversion)", () => {
+        const pbm = makePbmRaw(8, 2, [0xf0, 0x0f]);
+        const zpl = pbmRawToZplLabel(pbm).toString("ascii");
+        // 1 byte/row × 2 rows = 2 total bytes, hex "F00F"
+        expect(zpl).toContain("^GFA,2,2,1,F00F");
+    });
+
+    it("computes byte-per-row / total-byte counts correctly for a wider bitmap", () => {
+        // 16×3: 2 bytes/row, 6 bytes total
+        const pbm = makePbmRaw(16, 3, [0xff, 0x00, 0x0f, 0xf0, 0xaa, 0x55]);
+        const zpl = pbmRawToZplLabel(pbm).toString("ascii");
+        expect(zpl).toContain("^GFA,6,6,2,FF000FF0AA55");
     });
 });

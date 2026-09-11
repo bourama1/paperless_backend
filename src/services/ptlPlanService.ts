@@ -34,6 +34,8 @@
 import fs from "fs";
 import path from "path";
 import { getDb, getMasterplanDb } from "../config/database";
+import { normalizeWorkplace } from "./labelPrintingService";
+import { resolveHardwareOrders } from "./hardwareOrderLookupService";
 
 const PTL_PLAN_FOLDER_PATH = process.env.PTL_PLAN_FOLDER_PATH || "";
 
@@ -156,9 +158,23 @@ async function ingestPlanFile(
     const parsed = JSON.parse(raw) as { productionPlan: PlanRow[] };
     const rows = parsed.productionPlan || [];
 
+    // For Hardware rows, look up the matching HISTORY\OK order file to get
+    // the real production order number and hardware family (Indy/Guardy) —
+    // see hardwareOrderLookupService. Resolved as one batch (a handful of
+    // directory scans total) rather than per row, then just read out of the
+    // map below. Rows with no match yet (not produced/archived) simply get
+    // null — re-ingesting later will pick it up once it appears.
+    const hardwareRows = rows.filter(
+        (row) => normalizeWorkplace(row.workplace) === "hardware",
+    );
+    const hardwareInfo = resolveHardwareOrders(
+        hardwareRows.map((row) => ({ salesOrder: row.salesOrder, position: row.position })),
+    );
+
     let ingested = 0;
     for (const row of rows) {
         const plannedDate = parsePlanDate(row.date);
+        const hw = hardwareInfo.get(`${row.salesOrder}::${row.position}`);
         await db("ptl_prep_queue")
             .insert({
                 workplace: row.workplace,
@@ -170,6 +186,8 @@ async function ingestPlanFile(
                 planned_date: plannedDate,
                 plan_label: row.label,
                 source_file: filename,
+                product_order: hw?.productOrder ?? null,
+                hardware_type: hw?.hardwareType ?? null,
                 updated_at: db.fn.now(),
             })
             .onConflict(["project_number", "position", "workplace"])
@@ -180,6 +198,8 @@ async function ingestPlanFile(
                 planned_date: plannedDate,
                 plan_label: row.label,
                 source_file: filename,
+                product_order: hw?.productOrder ?? null,
+                hardware_type: hw?.hardwareType ?? null,
                 updated_at: db.fn.now(),
             });
         ingested++;
@@ -293,6 +313,7 @@ export interface PrepQueueFilters {
     dateFrom?: string | undefined;
     dateTo?: string | undefined;
     workplace?: string | undefined;
+    hardwareType?: string | undefined; // e.g. "Indy" / "Guardy"
 }
 
 /**
@@ -327,6 +348,9 @@ export async function getPrepQueue(filters: PrepQueueFilters = {}) {
     }
     if (filters.workplace) {
         query = query.andWhere("q.workplace", filters.workplace);
+    }
+    if (filters.hardwareType) {
+        query = query.andWhere("q.hardware_type", filters.hardwareType);
     }
 
     const rows: any[] = await query.select("q.*");
@@ -397,4 +421,14 @@ export async function getPrepQueueWorkplaces(): Promise<string[]> {
         .distinct("workplace")
         .orderBy("workplace");
     return rows.map((r: any) => r.workplace);
+}
+
+/** Distinct Hardware types (Indy/Guardy/...) currently present in the queue, for building a filter UI. */
+export async function getPrepQueueHardwareTypes(): Promise<string[]> {
+    const db = await getDb();
+    const rows = await db("ptl_prep_queue")
+        .distinct("hardware_type")
+        .whereNotNull("hardware_type")
+        .orderBy("hardware_type");
+    return rows.map((r: any) => r.hardware_type);
 }

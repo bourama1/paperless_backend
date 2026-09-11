@@ -68,18 +68,26 @@ export const DOCUMENTS_PRINTER_DPI = parseInt(
     10,
 );
 
-// ─── Prep label printer (Godex) ───────────────────────────────────────────────
+// ─── Prep label printer (Godex / Zebra) ────────────────────────────────────────
 // Separate printer config for the prep label (project number barcode, employee
-// name, etc.) — these are thermal labels on a Godex, not A4 documents on the
-// HP. The prep label PDF is rendered via Ghostscript and sent via raw TCP,
-// same pipeline as the documents printer but targeting a different machine.
+// name, etc.) — these are thermal labels, not A4 documents on the HP. The
+// prep label PDF is rendered and sent via raw TCP, same "no driver/spooler
+// needed" approach as the documents printer but targeting a different
+// machine — with one difference: unlike the HP and the Godex EZ2250i, a
+// Zebra ZD230 has no PCL/PostScript engine at all, only its own ZPL command
+// language, so a PCL-XL stream just makes it blink an error instead of
+// printing. Set PREP_LABEL_PRINTER_DEVICE=zpl for that class of printer —
+// see renderPdfToZplBuffer below — instead of a Ghostscript device name.
 //
-//   PREP_LABEL_PRINTER_HOST    Godex IP address (empty = return PDF to mobile instead)
+//   PREP_LABEL_PRINTER_HOST    printer IP address (empty = return PDF to mobile instead)
 //   PREP_LABEL_PRINTER_PORT    raw TCP port                 (default: 9100)
-//   PREP_LABEL_PRINTER_DEVICE  gs output device             (default: pxlmono)
+//   PREP_LABEL_PRINTER_DEVICE  gs output device, or "zpl" for a Zebra
+//                              ZPL-native printer (e.g. ZD230)   (default: pxlmono)
 //   PREP_LABEL_PRINTER_DPI     render resolution            (default: 203)
-//     203 DPI matches most Godex thermal printers' native resolution.
-//     Use 300 if your model is 300 DPI (check Godex spec sheet).
+//     203 DPI matches most Godex/Zebra desktop thermal printers' native
+//     resolution. Use 300 if your model is 300 DPI (check the spec sheet) —
+//     for "zpl" mode this must match the printer's actual configured DPI,
+//     since ^PW/^LL are emitted in dots at that resolution.
 
 export const PREP_LABEL_PRINTER_HOST = process.env.PREP_LABEL_PRINTER_HOST || "";
 export const PREP_LABEL_PRINTER_PORT = parseInt(
@@ -153,6 +161,101 @@ export function applyDuplexToBuffer(
     // ps2write: duplex is set as Ghostscript args in renderPdfForPrinter,
     // not as a byte header, so there's nothing to prepend here.
     return data;
+}
+
+// ─── Zebra ZPL rendering (raster) ───────────────────────────────────────────
+//
+// Ghostscript has no ZPL output device, so instead of typesetting each field
+// in ZPL directly, the whole rendered page is rasterized to a 1-bit bitmap
+// and wrapped in a single ZPL ^GFA "Graphic Field" command — the label
+// prints as one image. This trades a little print sharpness on curves for
+// reusing the exact same PDF-building code (and font/barcode rendering) that
+// already exists for every other printer, with no per-field ZPL translation
+// needed.
+//
+// Ghostscript's pbmraw device (raw Netpbm PBM, 1 bit/pixel, MSB-first, rows
+// padded to a whole byte, 1=black/0=white) uses the exact same bit
+// convention as ZPL's Graphic Field, so this is a direct hex re-encoding —
+// no pixel inversion or bit-order shuffling needed.
+
+/**
+ * Parses a raw PBM (P4) buffer — as produced by Ghostscript's pbmraw device
+ * — into its pixel dimensions and packed 1bpp row data.
+ */
+export function parsePbmRaw(pbm: Buffer): { width: number; height: number; data: Buffer } {
+    if (pbm[0] !== 0x50 || pbm[1] !== 0x34) {
+        // "P4"
+        throw new Error("Expected a raw PBM (P4) buffer from Ghostscript's pbmraw device");
+    }
+
+    // Netpbm header: magic, then whitespace-separated width/height tokens
+    // (comment lines starting with '#' may appear between tokens), followed
+    // by exactly one whitespace byte before the binary pixel data.
+    let offset = 2;
+    const dims: number[] = [];
+    while (dims.length < 2) {
+        while (offset < pbm.length && /\s/.test(String.fromCharCode(pbm[offset]!))) offset++;
+        if (pbm[offset] === 0x23) {
+            while (offset < pbm.length && pbm[offset] !== 0x0a) offset++;
+            continue;
+        }
+        const start = offset;
+        while (offset < pbm.length && !/\s/.test(String.fromCharCode(pbm[offset]!))) offset++;
+        dims.push(parseInt(pbm.toString("ascii", start, offset), 10));
+    }
+    offset++; // the single whitespace byte separating header from pixel data
+
+    const [width, height] = dims as [number, number];
+    const bytesPerRow = Math.ceil(width / 8);
+    const data = pbm.subarray(offset, offset + bytesPerRow * height);
+    return { width, height, data };
+}
+
+/**
+ * Wraps a raw PBM (P4) buffer into a complete Zebra ZPL label job: a ^GFA
+ * graphic field holding the whole bitmap, inside a minimal ^XA...^XZ label
+ * sized to the bitmap via ^PW/^LL. Pure/sync so it's directly testable
+ * against a hand-built PBM buffer, same as applyDuplexToBuffer above.
+ */
+export function pbmRawToZplLabel(pbm: Buffer): Buffer {
+    const { width, height, data } = parsePbmRaw(pbm);
+    const bytesPerRow = Math.ceil(width / 8);
+    const totalBytes = bytesPerRow * height;
+    const hex = data.toString("hex").toUpperCase();
+
+    return Buffer.from(
+        [
+            "^XA",
+            `^PW${width}`,
+            `^LL${height}`,
+            "^FO0,0",
+            `^GFA,${totalBytes},${totalBytes},${bytesPerRow},${hex}`,
+            "^FS",
+            "^XZ",
+            "",
+        ].join("\n"),
+        "ascii",
+    );
+}
+
+/**
+ * Renders a PDF to a complete Zebra ZPL label job: rasterizes it via
+ * Ghostscript's pbmraw device at `dpi`, then wraps the bitmap via
+ * pbmRawToZplLabel. The returned buffer is plain ASCII — send it straight
+ * to the printer's raw TCP port, no PJL/PCL wrapping involved.
+ */
+export async function renderPdfToZplBuffer(pdfPath: string, dpi: number): Promise<Buffer> {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+
+    const { stdout } = await execFileAsync(
+        GHOSTSCRIPT_BIN,
+        ["-dBATCH", "-dNOPAUSE", "-dQUIET", "-sDEVICE=pbmraw", `-r${dpi}`, "-sOutputFile=-", pdfPath],
+        { timeout: 60_000, encoding: "buffer" as any, maxBuffer: 1024 * 1024 * 50 },
+    );
+
+    return pbmRawToZplLabel(stdout as unknown as Buffer);
 }
 
 /**
@@ -262,27 +365,29 @@ export async function printPrepLabelBuffer(pdfBuffer: Buffer): Promise<boolean> 
     try {
         fs.writeFileSync(tmpPath, pdfBuffer);
 
-        const { execFile } = await import("child_process");
-        const { promisify } = await import("util");
-        const execFileAsync = promisify(execFile);
-
-        const rendered: Buffer = await (async () => {
-            const args = [
-                "-dBATCH",
-                "-dNOPAUSE",
-                "-dQUIET",
-                `-sDEVICE=${PREP_LABEL_PRINTER_DEVICE}`,
-                `-r${PREP_LABEL_PRINTER_DPI}`,
-                "-sOutputFile=-",
-                tmpPath,
-            ];
-            const { stdout } = await execFileAsync(GHOSTSCRIPT_BIN, args, {
-                timeout: 60_000,
-                encoding: "buffer" as any,
-                maxBuffer: 1024 * 1024 * 50,
-            });
-            return stdout as unknown as Buffer;
-        })();
+        const rendered: Buffer =
+            PREP_LABEL_PRINTER_DEVICE.toLowerCase() === "zpl"
+                ? await renderPdfToZplBuffer(tmpPath, PREP_LABEL_PRINTER_DPI)
+                : await (async () => {
+                      const { execFile } = await import("child_process");
+                      const { promisify } = await import("util");
+                      const execFileAsync = promisify(execFile);
+                      const args = [
+                          "-dBATCH",
+                          "-dNOPAUSE",
+                          "-dQUIET",
+                          `-sDEVICE=${PREP_LABEL_PRINTER_DEVICE}`,
+                          `-r${PREP_LABEL_PRINTER_DPI}`,
+                          "-sOutputFile=-",
+                          tmpPath,
+                      ];
+                      const { stdout } = await execFileAsync(GHOSTSCRIPT_BIN, args, {
+                          timeout: 60_000,
+                          encoding: "buffer" as any,
+                          maxBuffer: 1024 * 1024 * 50,
+                      });
+                      return stdout as unknown as Buffer;
+                  })();
 
         await new Promise<void>((resolve, reject) => {
             const socket = new net.Socket();
@@ -300,7 +405,7 @@ export async function printPrepLabelBuffer(pdfBuffer: Buffer): Promise<boolean> 
         });
 
         console.log(
-            `[PREP] Sent prep label to Godex at ${PREP_LABEL_PRINTER_HOST}:${PREP_LABEL_PRINTER_PORT}`,
+            `[PREP] Sent prep label (${PREP_LABEL_PRINTER_DEVICE}) to ${PREP_LABEL_PRINTER_HOST}:${PREP_LABEL_PRINTER_PORT}`,
         );
         return true;
     } finally {

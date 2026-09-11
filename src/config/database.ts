@@ -437,6 +437,20 @@ const setupDatabase = async (targetDb: Knex) => {
         });
     }
 
+    // 14b. Hardware-specific columns on ptl_prep_queue — the production
+    // order number and hardware family (e.g. "Indy"/"Guardy"), looked up
+    // from the matching HISTORY\OK order JSON when a Hardware row is
+    // ingested (see ptlPlanService.ingestPlanFile / hardwareOrderLookupService).
+    // Null for non-Hardware rows, and for Hardware rows not produced/
+    // archived yet — added via alterTable so existing deployments pick it
+    // up without losing prior rows, same as order_preparation_log above.
+    if (!(await targetDb.schema.hasColumn("ptl_prep_queue", "product_order"))) {
+        await targetDb.schema.alterTable("ptl_prep_queue", (table) => {
+            table.string("product_order");
+            table.string("hardware_type");
+        });
+    }
+
     // 15. ptl_ingest_state table — a single row tracking the last
     // productionPlanPTL.json file that was actually ingested, so the
     // periodic checker (and the force-refresh endpoint) can tell "nothing
