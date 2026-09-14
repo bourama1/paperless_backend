@@ -294,6 +294,106 @@ describe("Workstation Service", () => {
         });
     });
 
+    // cycle_timings is upserted on every handleOrderUpdate call (STARTED ->
+    // started_at, FINISHED -> finished_at) — see recordCycleTiming. Unlike
+    // the loosely-mocked db above (which silently swallows the db.fn.now()/
+    // db.raw() calls other blocks make, caught by their own try/catch), this
+    // group builds a full mock so the actual upsert args can be inspected.
+    describe("cycle_timings (recordCycleTiming)", () => {
+        function buildDb(capture: { table?: string; insertArgs?: any; mergeArgs?: any }) {
+            const db = Object.assign(jest.fn(), {
+                fn: { now: jest.fn(() => "NOW()") },
+                raw: jest.fn((sql: string) => ({ __raw: sql })),
+            });
+            db.mockImplementation((table: string) => {
+                if (table === "workstation_log") return { insert: () => thenable(undefined) };
+                if (table === "order_cycle_state") return orderCycleStateTable();
+                if (table === "workstations") return workstationsTable();
+                if (table === "document_print_log") {
+                    return {
+                        where: () => ({ first: () => thenable(null) }),
+                        insert: () => ({ onConflict: () => ({ ignore: () => thenable(undefined) }) }),
+                    };
+                }
+                if (table === "cycle_timings") {
+                    capture.table = table;
+                    return {
+                        insert: (args: any) => {
+                            capture.insertArgs = args;
+                            return {
+                                onConflict: (cols: string[]) => ({
+                                    merge: (mergeArgs: any) => {
+                                        capture.mergeArgs = mergeArgs;
+                                        expect(cols).toEqual(["order_id", "cycle_index"]);
+                                        return thenable(undefined);
+                                    },
+                                }),
+                            };
+                        },
+                    };
+                }
+                return {};
+            });
+            return db;
+        }
+
+        it("upserts started_at (not finished_at) on a STARTED event", async () => {
+            const capture: any = {};
+            (getDb as jest.Mock).mockResolvedValue(buildDb(capture));
+
+            await handleOrderUpdate(mockUpdate); // action: STARTED
+
+            expect(capture.table).toBe("cycle_timings");
+            expect(capture.insertArgs).toMatchObject({
+                order_id: mockOrder._id,
+                cycle_index: mockUpdate.cycleIndex,
+                total_cycles: mockUpdate.totalCycles,
+                workplace: mockOrder.workplace,
+                product_order: mockOrder.productOrder,
+                project_number: mockOrder.projectNumber,
+                position: mockOrder.position,
+                sales_order: mockOrder.salesOrder,
+                started_at: "NOW()",
+            });
+            expect(capture.insertArgs.finished_at).toBeUndefined();
+            // The merge must COALESCE started_at (first-write-wins) rather
+            // than overwrite it outright on a duplicate/retried STARTED.
+            expect(capture.mergeArgs.started_at).toEqual({
+                __raw: "COALESCE(cycle_timings.started_at, EXCLUDED.started_at)",
+            });
+        });
+
+        it("upserts finished_at (not started_at) on a FINISHED event", async () => {
+            const capture: any = {};
+            (getDb as jest.Mock).mockResolvedValue(buildDb(capture));
+            const finishedUpdate = { ...mockUpdate, action: "FINISHED" as const };
+
+            await handleOrderUpdate(finishedUpdate);
+
+            expect(capture.insertArgs.finished_at).toBe("NOW()");
+            expect(capture.insertArgs.started_at).toBeUndefined();
+            expect(capture.mergeArgs.finished_at).toEqual({
+                __raw: "COALESCE(cycle_timings.finished_at, EXCLUDED.finished_at)",
+            });
+        });
+
+        it("does not let a cycle_timings failure break the rest of handleOrderUpdate", async () => {
+            const db = jest.fn();
+            db.mockImplementation((table: string) => {
+                if (table === "workstation_log") return { insert: () => thenable(undefined) };
+                if (table === "order_cycle_state") return orderCycleStateTable();
+                if (table === "workstations") return workstationsTable();
+                if (table === "cycle_timings") throw new Error("boom");
+                return {};
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await handleOrderUpdate(mockUpdate);
+
+            expect(handleLabelPrinting).toHaveBeenCalledWith(mockUpdate);
+        });
+    });
+
     describe("importDocument", () => {
         it("should fetch a document and create a local record", async () => {
             const mockHeadResponse = {

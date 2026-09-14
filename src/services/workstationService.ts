@@ -179,6 +179,44 @@ export const pollWorkstations = async () => {
     }
 };
 
+/**
+ * Upserts the started_at/finished_at timestamp for one physical cycle
+ * (order_id + cycle_index) into cycle_timings. First-write-wins on
+ * whichever column `field` is — a duplicate/retried STARTED or FINISHED
+ * for the same cycle must not reset a timestamp that's already recorded,
+ * hence the COALESCE in the merge rather than a plain overwrite.
+ */
+async function recordCycleTiming(
+    db: any,
+    order: OrderUpdate["order"],
+    cycleIndex: number,
+    totalCycles: number,
+    field: "started_at" | "finished_at",
+): Promise<void> {
+    const shared = {
+        total_cycles: totalCycles,
+        workplace: order.workplace,
+        product_order: order.productOrder,
+        project_number: order.projectNumber,
+        position: order.position,
+        sales_order: order.salesOrder,
+    };
+    await db("cycle_timings")
+        .insert({
+            order_id: order._id,
+            cycle_index: cycleIndex,
+            ...shared,
+            [field]: db.fn.now(),
+            updated_at: db.fn.now(),
+        })
+        .onConflict(["order_id", "cycle_index"])
+        .merge({
+            ...shared,
+            [field]: db.raw(`COALESCE(cycle_timings.${field}, EXCLUDED.${field})`),
+            updated_at: db.fn.now(),
+        });
+}
+
 export const handleOrderUpdate = async (update: OrderUpdate) => {
     try {
         const db = await getDb();
@@ -245,6 +283,23 @@ export const handleOrderUpdate = async (update: OrderUpdate) => {
             }
         } catch (err: any) {
             console.error(`[WORKSTATIONS] Failed to save cycle state for order ${orderId}:`, err);
+        }
+
+        // Record when this specific cycle started/finished, for employee
+        // time-norms calculations later — see cycle_timings in database.ts.
+        try {
+            await recordCycleTiming(
+                db,
+                update.order,
+                update.cycleIndex,
+                update.totalCycles,
+                update.action === "STARTED" ? "started_at" : "finished_at",
+            );
+        } catch (err: any) {
+            console.error(
+                `[WORKSTATIONS] Failed to record cycle timing for order ${orderId} cycle ${update.cycleIndex}:`,
+                err,
+            );
         }
 
         if (update.action === "FINISHED") {

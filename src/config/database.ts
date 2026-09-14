@@ -489,4 +489,36 @@ const setupDatabase = async (targetDb: Knex) => {
             table.timestamp("created_at").defaultTo(targetDb.fn.now());
         });
     }
+
+    // 17. cycle_timings table — records when each physical cycle actually
+    // started and finished (from the STARTED/FINISHED webhook events —
+    // see workstationService.recordCycleTiming), for computing employee time
+    // norms. One row per (order_id, cycle_index), first-write-wins on each
+    // timestamp column (a duplicate/retried STARTED or FINISHED for the same
+    // cycle must not reset an already-recorded time) — see the COALESCE in
+    // recordCycleTiming's upsert. Denormalizes workplace/product_order/
+    // project_number/position/sales_order from the order snapshot so this
+    // table can be queried on its own, without joining workstation_log.
+    // Deliberately does NOT try to attach employee_name here — the FINISHED
+    // webhook doesn't carry it; that only exists later via a manual kiosk
+    // confirmation (order_completion_log), which a reporting query can join
+    // in separately on (order_id, cycle_index) when it exists.
+    if (!(await targetDb.schema.hasTable("cycle_timings"))) {
+        await targetDb.schema.createTable("cycle_timings", (table) => {
+            table.increments("id").primary();
+            table.string("order_id").notNullable();
+            table.integer("cycle_index").notNullable();
+            table.integer("total_cycles").notNullable().defaultTo(1);
+            table.string("workplace");
+            table.string("product_order");
+            table.string("project_number");
+            table.string("position");
+            table.string("sales_order");
+            table.timestamp("started_at");
+            table.timestamp("finished_at");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+            table.unique(["order_id", "cycle_index"]);
+        });
+    }
 };
