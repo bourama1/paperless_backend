@@ -1341,9 +1341,15 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         `[LABELS] workplace="${order.workplace}" → ${matchingTypes.size} matching types in parametry`,
     );
 
-    // Keep only CSV rows whose type exists in the parametry match set.
-    labelRows = labelRows.filter((row) => matchingTypes.has(row.labelType));
-    if (labelRows.length === 0) {
+    // Keep only CSV rows whose type exists in the parametry match set — but
+    // NOT by reassigning labelRows: the QR sticker's TMP*.TXT reference (see
+    // handleQrSticker below) can live on a row whose labelType belongs to a
+    // DIFFERENT workplace's entries in the same combined CSV (e.g. "section"/
+    // "motor" rows carry it while this workplace's own matched rows, like
+    // "t10_hw_kr", have that column blank) — handleQrSticker needs the full,
+    // unfiltered CSV to find it, so labelRows stays untouched for that call.
+    const matchedRows = labelRows.filter((row) => matchingTypes.has(row.labelType));
+    if (matchedRows.length === 0) {
         console.log(
             `[LABELS] No CSV rows match parametry types for this barcode, nothing to print`,
         );
@@ -1359,7 +1365,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 
     // Build a set of all known parametry types for CSV row filtering
     const allParametryTypes = new Set(parametryConfig.map((e: any) => e.type));
-    let cycleRows = labelRows.filter((r) => allParametryTypes.has(r.labelType));
+    let cycleRows = matchedRows.filter((r) => allParametryTypes.has(r.labelType));
 
     // The Motor workstation assembles every door's motor hardware for the
     // whole order in one physical pass instead of one visit per door — see
@@ -1376,7 +1382,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     }
 
     console.log(
-        `[LABELS] ${cycleRows.length} rows for cycle ${cycleIndex}/${totalCycles} (${labelRows.length} matching in CSV)`,
+        `[LABELS] ${cycleRows.length} rows for cycle ${cycleIndex}/${totalCycles} (${matchedRows.length} matching in CSV)`,
     );
 
     let printed = 0;

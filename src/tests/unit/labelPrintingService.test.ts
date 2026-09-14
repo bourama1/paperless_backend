@@ -240,6 +240,42 @@ describe("Label Printing Service", () => {
 
             await handleLabelPrinting(mockOrderUpdate);
         });
+
+        // Regression: a real combined CSV has rows for several workplaces
+        // (Hardware's "*_hw_kr" rows, plus "section"/"motor"/"mot_prisl2" for
+        // other stations) sharing one TMP*.TXT reference — but only some of
+        // those rows actually carry the tmpFile column filled in (here:
+        // "motor", not the Hardware-matching "t01_hw_kr" row). Printing was
+        // narrowing the CSV down to just the current workplace's matching
+        // rows BEFORE handing off to the QR sticker step, so a TMP file that
+        // only appeared on a row for a different workplace was invisible to
+        // it — see the labelRows/matchedRows split in handleLabelPrinting.
+        it("finds the TMP*.TXT reference for the QR sticker even when it only appears on a row for a different workplace", async () => {
+            const csv = [
+                't01_hw_kr;"Customer";"SO-001";"Part1";"1/1";"01";"123456";"789012";"PO-001";"001234";"R1";"Germ.";"0.5";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
+                'motor;"Customer";"SO-001";"";"Motor 1/1";"01";"123457";"789013";"PO-001";"001235";"R1";"Germ.";"1.0";"TMP999.TXT";;"Delivery GmbH";"Main St 1";"12345";"Germ."',
+            ].join("\n");
+            (fs.readFileSync as jest.Mock).mockImplementation((p: string) => {
+                if (p.includes("country-codes.json")) return sampleCountryCodes;
+                return csv;
+            });
+            (fs.existsSync as jest.Mock).mockImplementation(
+                (p: string) => !p.includes("TMP999.TXT"), // exists check for the TMP path itself returns false, everything else true
+            );
+            const db = createDbMock();
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            const lastCycleUpdate = { ...mockOrderUpdate, cycleIndex: 1, totalCycles: 1 };
+            await handleLabelPrinting(lastCycleUpdate);
+
+            // handleQrSticker only gets this far (calling parseTmpFile ->
+            // fs.existsSync on the TMP path) if it was actually handed a row
+            // carrying the tmpFile reference — the pre-fix code would have
+            // logged "No TMP file reference" and never reached here.
+            expect(fs.existsSync).toHaveBeenCalledWith(
+                expect.stringContaining("TMP999.TXT"),
+            );
+        });
     });
 
     describe("handleQrSticker", () => {
