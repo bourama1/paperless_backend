@@ -766,7 +766,14 @@ export function generateEzpl(label: LabelRow, template: string): Buffer {
 // affect readability or scanning.
 
 const GODEX_BITMAP_FONT_POINTS: Record<string, number> = {
-    A: 6, B: 8, C: 10, D: 12, E: 14, F: 18, G: 24, H: 30,
+    A: 6,
+    B: 8,
+    C: 10,
+    D: 12,
+    E: 14,
+    F: 18,
+    G: 24,
+    H: 30,
 };
 
 function zplFontDots(fontLetter: string, dpi: number): number {
@@ -781,13 +788,28 @@ function zplValue(val: string): string {
     return val.replace(/[\^~]/g, " ");
 }
 
-function zplText(fontLetter: string, x: number, y: number, xMul: number, yMul: number, text: string, dpi: number): string {
+function zplText(
+    fontLetter: string,
+    x: number,
+    y: number,
+    xMul: number,
+    yMul: number,
+    text: string,
+    dpi: number,
+): string {
     if (!text) return "";
     const base = zplFontDots(fontLetter, dpi);
     return `^FO${x},${y}^A0N,${base * yMul},${base * xMul}^FD${zplValue(text)}^FS`;
 }
 
-function zplBarcode39(x: number, y: number, narrow: number, wide: number, height: number, data: string): string {
+function zplBarcode39(
+    x: number,
+    y: number,
+    narrow: number,
+    wide: number,
+    height: number,
+    data: string,
+): string {
     if (!data) return "";
     return `^FO${x},${y}^BY${narrow},${wide}^B3N,N,${height},Y,N^FD${zplValue(data)}^FS`;
 }
@@ -917,7 +939,11 @@ function generateOutsideEuBlockZpl(label: LabelRow, dpi: number): string {
 
 /** ZPL equivalent of generateEzpl — same template selection, same field
  * values, translated command-for-command (see the comment block above). */
-export function generateZpl(label: LabelRow, template: string, dpi: number): Buffer {
+export function generateZpl(
+    label: LabelRow,
+    template: string,
+    dpi: number,
+): Buffer {
     const block =
         template === "aktualniCMDinter"
             ? generateSimpleBlockZpl(label, dpi)
@@ -1034,16 +1060,17 @@ function resolveWorkplacePrinter(workplace: string): {
     dpi: number;
 } {
     const key = workplace.toUpperCase().replace(/\s+/g, "_");
-    const uncPath =
-        process.env[`LABEL_PRINTER_UNC_${key}`] || PRINTER_UNC_PATH;
-    const host =
-        process.env[`LABEL_PRINTER_HOST_${key}`] || PRINTER_HOST;
+    const uncPath = process.env[`LABEL_PRINTER_UNC_${key}`] || PRINTER_UNC_PATH;
+    const host = process.env[`LABEL_PRINTER_HOST_${key}`] || PRINTER_HOST;
     const port = process.env[`LABEL_PRINTER_PORT_${key}`]
         ? parseInt(process.env[`LABEL_PRINTER_PORT_${key}`]!, 10)
         : PRINTER_PORT;
-    const lang = (
-        process.env[`LABEL_PRINTER_LANG_${key}`] || PRINTER_LANG
-    ).toLowerCase() === "zpl" ? "zpl" : "ezpl";
+    const lang =
+        (
+            process.env[`LABEL_PRINTER_LANG_${key}`] || PRINTER_LANG
+        ).toLowerCase() === "zpl"
+            ? "zpl"
+            : "ezpl";
     const dpi = process.env[`LABEL_PRINTER_DPI_${key}`]
         ? parseInt(process.env[`LABEL_PRINTER_DPI_${key}`]!, 10)
         : PRINTER_DPI;
@@ -1343,7 +1370,9 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
     // "motor" rows carry it while this workplace's own matched rows, like
     // "t10_hw_kr", have that column blank) — handleQrSticker needs the full,
     // unfiltered CSV to find it, so labelRows stays untouched for that call.
-    const matchedRows = labelRows.filter((row) => matchingTypes.has(row.labelType));
+    const matchedRows = labelRows.filter((row) =>
+        matchingTypes.has(row.labelType),
+    );
     if (matchedRows.length === 0) {
         console.log(
             `[LABELS] No CSV rows match parametry types for this barcode, nothing to print`,
@@ -1360,7 +1389,9 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 
     // Build a set of all known parametry types for CSV row filtering
     const allParametryTypes = new Set(parametryConfig.map((e: any) => e.type));
-    let cycleRows = matchedRows.filter((r) => allParametryTypes.has(r.labelType));
+    let cycleRows = matchedRows.filter((r) =>
+        allParametryTypes.has(r.labelType),
+    );
 
     // The Motor workstation assembles every door's motor hardware for the
     // whole order in one physical pass instead of one visit per door — see
@@ -1417,7 +1448,12 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
             const config = resolveConfig(row.labelType);
             const copies = COPIES_OVERRIDE ?? entry.copies ?? config.copies;
 
-            const { uncPath: wpUnc, host: wpHost, lang: wpLang, dpi: wpDpi } = resolveWorkplacePrinter(order.workplace);
+            const {
+                uncPath: wpUnc,
+                host: wpHost,
+                lang: wpLang,
+                dpi: wpDpi,
+            } = resolveWorkplacePrinter(order.workplace);
             const printerConfigured = !!(wpUnc || wpHost);
 
             try {
@@ -1470,7 +1506,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 //
 // Triggered only on the LAST cycle (cycleIndex === totalCycles).
 // Reads the TMP*.TXT file from the network share to find:
-//   - characteristic 6210610 → rail type (e.g. "GSL", "VL", "SL")
+//   - characteristic 06210610 → rail type (e.g. "GSL", "VL", "SL")
 //   - "Objednáno" row → PocetVrat (number of doors to print)
 //   - "Cenová skupina" → if "C01" skip entirely
 // Maps rail type → QR PNG filename, prints PocetVrat copies.
@@ -1524,7 +1560,7 @@ const QR_CODE_MAP: Record<string, string> = {
  * position matches the order position (col F of pracovniTXT = position field).
  *
  * Within that section:
- *   col B = "6210610"  → col D = rail type (TypVedeni)
+ *   col B = "06210610"  → col D = rail type (TypVedeni)
  *   col A = "Objednáno" → col B = door count (PocetVrat)
  *   col C = "Cenová skupina" → col D = price group (CenovaSkupina)
  */
@@ -1564,8 +1600,8 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
 
         if (!inSection) continue;
 
-        // Rail type: col B = "6210610" → col D = value
-        if (cols[1] === "6210610" && cols[3]) {
+        // Rail type: col B = "06210610" → col D = value
+        if (cols[1] === "06210610" && cols[3]) {
             railType = cols[3].trim();
         }
 
@@ -1582,7 +1618,7 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
 
     if (!railType) {
         console.warn(
-            `[QR] Could not find rail type (6210610) in ${filePath} for position ${position}`,
+            `[QR] Could not find rail type (06210610) in ${filePath} for position ${position}`,
         );
         return null;
     }
