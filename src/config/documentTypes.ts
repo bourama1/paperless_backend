@@ -1,3 +1,5 @@
+import { normalizeWorkplace } from "../utils/normalizeWorkplace";
+
 // doc_manager document_type IDs, shared between the STARTED-cycle document
 // printing flow (workstationService.printDocumentsForOrder) and the
 // finished-order retention archival flow (services/archivalService.ts).
@@ -64,17 +66,6 @@ export function documentTypeName(typeId: number): string {
 // under — these are NOT the same grouping as the label scan prefixes
 // (e.g. "Motor" shares a label scan prefix with "Hardware", but has its
 // own, separate PBOM document type).
-//
-// Kept as a local copy of the normalization (rather than importing from
-// labelPrintingService.ts) to avoid a circular import between this file,
-// labelPrintingService.ts, and workstationService.ts.
-function normalizeWorkplace(name: string): string {
-    return name
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "") // strip diacritics
-        .replace(/[^a-zA-Z0-9]/g, "") // strip spaces/punctuation
-        .toLowerCase();
-}
 
 const WORKPLACE_TO_PBOM_TYPE_MAP: Record<string, number> = {
     hardware: DOCUMENT_TYPES.PBOM_HARDWARE,

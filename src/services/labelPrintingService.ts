@@ -93,13 +93,8 @@ const SCAN_PREFIX = {
     VEDENI: 'K"žSVV ', // rail / track
 } as const;
 
-export function normalizeWorkplace(name: string): string {
-    return name
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "") // strip diacritics
-        .replace(/[^a-zA-Z0-9]/g, "") // strip spaces/punctuation
-        .toLowerCase();
-}
+import { normalizeWorkplace } from "../utils/normalizeWorkplace";
+export { normalizeWorkplace };
 
 const WORKPLACE_TO_SCAN_PREFIX: Record<string, string> = {
     hardware: SCAN_PREFIX.HARDWARE,
