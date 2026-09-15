@@ -3,6 +3,8 @@ import {
     applyDuplexToBuffer,
     parsePbmRaw,
     pbmRawToZplLabel,
+    buildPdfFromPngFitted,
+    PngInfo,
 } from "../../services/documentPrinterService";
 import {
     code39Geometry,
@@ -251,6 +253,61 @@ describe("parsePbmRaw", () => {
 
     it("throws on a buffer that isn't a raw PBM (P4)", () => {
         expect(() => parsePbmRaw(Buffer.from("P5\n8 2\n", "ascii"))).toThrow();
+    });
+});
+
+function fakePng(width: number, height: number): PngInfo {
+    return {
+        width,
+        height,
+        bitDepth: 8,
+        colorType: 0, // gray — simplest valid /ColorSpace, content doesn't matter for these tests
+        idat: Buffer.from([1, 2, 3]),
+        palette: undefined,
+    };
+}
+
+// The PNG's own "cm" transform matrix: `q <w> 0 0 <h> <x> <y> cm /Im0 Do Q`.
+function extractCm(pdf: string): { w: number; h: number; x: number; y: number } {
+    const m = /q ([\d.]+) 0 0 ([\d.]+) ([\d.]+) ([\d.]+) cm/.exec(pdf);
+    if (!m) throw new Error("cm transform not found in PDF content stream");
+    return { w: Number(m[1]), h: Number(m[2]), x: Number(m[3]), y: Number(m[4]) };
+}
+
+describe("buildPdfFromPngFitted", () => {
+    // Label stock size in points, same as PREP_LABEL_PAGE_WIDTH_PT/HEIGHT_PT.
+    const PAGE_W = 283.46;
+    const PAGE_H = 368.5;
+
+    it("sets the MediaBox to the fixed page size, not the image's own size", () => {
+        const pdf = buildPdfFromPngFitted(fakePng(200, 100), PAGE_W, PAGE_H).toString("latin1");
+        expect(pdf).toContain(`/MediaBox [0 0 ${PAGE_W.toFixed(2)} ${PAGE_H.toFixed(2)}]`);
+    });
+
+    it("scales a wide image down to the page width and centers it vertically", () => {
+        // 200×100 px @ 96dpi = 150×75 pt — wider (relative to height) than the
+        // page, so width is the constraining dimension.
+        const pdf = buildPdfFromPngFitted(fakePng(200, 100), PAGE_W, PAGE_H).toString("latin1");
+        const { w, h, x, y } = extractCm(pdf);
+
+        expect(w).toBeCloseTo(PAGE_W, 1); // fills the full width
+        expect(h).toBeLessThan(PAGE_H); // doesn't fill the height
+        expect(x).toBeCloseTo(0, 1); // flush left/right (no horizontal margin)
+        expect(y).toBeCloseTo((PAGE_H - h) / 2, 1); // centered vertically
+        expect(w / h).toBeCloseTo(200 / 100, 2); // aspect ratio preserved
+    });
+
+    it("scales a tall image down to the page height and centers it horizontally", () => {
+        // 100×200 px @ 96dpi = 75×150 pt — taller (relative to width) than
+        // the page, so height is the constraining dimension.
+        const pdf = buildPdfFromPngFitted(fakePng(100, 200), PAGE_W, PAGE_H).toString("latin1");
+        const { w, h, x, y } = extractCm(pdf);
+
+        expect(h).toBeCloseTo(PAGE_H, 1); // fills the full height
+        expect(w).toBeLessThan(PAGE_W); // doesn't fill the width
+        expect(y).toBeCloseTo(0, 1);
+        expect(x).toBeCloseTo((PAGE_W - w) / 2, 1); // centered horizontally
+        expect(w / h).toBeCloseTo(100 / 200, 2);
     });
 });
 

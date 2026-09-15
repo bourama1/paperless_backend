@@ -30,8 +30,14 @@ import fs from "fs";
 import path from "path";
 import net from "net";
 import { getDb } from "../config/database";
-import { OrderUpdate } from "./workstationService";
-import { DOCUMENTS_PRINTER_HOST, printPngFile } from "./documentPrinterService";
+import { OrderUpdate, motorCycleRange } from "./workstationService";
+import {
+    DOCUMENTS_PRINTER_HOST,
+    printPngFile,
+    renderPngAsZplLabel,
+    PREP_LABEL_PAGE_WIDTH_PT,
+    PREP_LABEL_PAGE_HEIGHT_PT,
+} from "./documentPrinterService";
 
 // EU countries that use the 47-line simplified label (from parametry AM:AN)
 const EU_COUNTRIES = new Set([
@@ -1254,29 +1260,25 @@ export function selectRowsForCycle(
 
 /**
  * Selects rows for the Motor workstation, which — unlike the per-door
- * stations above — assembles every door's motor hardware for the whole
- * order in a single physical pass rather than one visit per door. So
- * instead of filtering by door number, this takes the first `quantity`
- * rows (in CSV order) of EACH label type, where quantity is how many
- * physical units (doors) this order produces — order.quantity, the same
- * field workstationService already treats as the order's total unit count
- * (see the order_cycle_state comments in workstationService.ts).
+ * stations above — assembles every door's motor hardware in physical
+ * batches rather than one visit per door. So instead of filtering by door
+ * number, this takes a [start, start+count) slice (in CSV order) of EACH
+ * label type — the range for THIS cycle's batch, from
+ * workstationService.motorCycleRange, which is what actually knows how
+ * many physical units are in front of the operator right now (order.quantity
+ * alone is the order's grand total, never a single cycle's batch size).
  *
  * Capped at however many rows actually exist for a type, so a CSV with
- * fewer motor rows than the order quantity still prints everything
- * available instead of erroring. If quantity is missing or invalid (<=0),
- * falls back to "all rows" — the old, pre-quantity-cap behavior — rather
- * than printing nothing.
- *
- * ASSUMPTION worth confirming against real production data: this reads
- * order.quantity as "how many doors/motors this order needs, in total,
- * across every cycle" — not a live "how many are physically in front of
- * you right now" value from some other API. If the Motor workstation ever
- * needs the latter instead, this is the function to change.
+ * fewer motor rows than requested still prints everything available
+ * instead of erroring. A non-positive `count` selects nothing for that
+ * call (an empty/invalid range) rather than falling back to "everything" —
+ * callers that want the old unbatched behavior pass motorCycleRange's own
+ * fallback range (start=0, count=quantity) explicitly.
  */
 export function selectMotorBatchRows(
     rows: LabelRow[],
-    quantity: number,
+    start: number,
+    count: number,
 ): LabelRow[] {
     const byType = new Map<string, LabelRow[]>();
     for (const row of rows) {
@@ -1284,10 +1286,11 @@ export function selectMotorBatchRows(
         list.push(row);
         byType.set(row.labelType, list);
     }
-    const limit = quantity && quantity > 0 ? quantity : Infinity;
+    const from = Math.max(0, start || 0);
+    const to = from + Math.max(0, count || 0);
     const selected: LabelRow[] = [];
     for (const typeRows of byType.values()) {
-        selected.push(...typeRows.slice(0, limit));
+        selected.push(...typeRows.slice(from, to));
     }
     return selected;
 }
@@ -1393,15 +1396,29 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
         allParametryTypes.has(r.labelType),
     );
 
-    // The Motor workstation assembles every door's motor hardware for the
-    // whole order in one physical pass instead of one visit per door — see
-    // selectMotorBatchRows for why this needs its own branch instead of the
-    // normal per-door filtering below.
+    // The Motor workstation assembles every door's motor hardware in
+    // physical batches (see selectMotorBatchRows) instead of one visit per
+    // door. When the order actually splits into multiple maxCycle-capped
+    // batches (usesMotorBatching), each cycle gets its OWN slice and must
+    // print its own labels — the entry-level gate below is skipped for it.
+    // When it doesn't (no usable maxCycle, or a single cycle), this is the
+    // old single-pass behavior: the whole batch prints once, on the first
+    // cycle event, and every later cycle event for the same order is a
+    // no-op — see that gate for why.
     const isMotorWorkplace = normalizeWorkplace(order.workplace) === "motor";
+    const usesMotorBatching =
+        isMotorWorkplace && !!order.maxCycle && order.maxCycle > 0 && totalCycles > 1;
     if (isMotorWorkplace) {
-        cycleRows = selectMotorBatchRows(cycleRows, order.quantity);
+        const { start, count } = motorCycleRange(
+            order.quantity,
+            order.maxCycle,
+            cycleIndex,
+            totalCycles,
+        );
+        cycleRows = selectMotorBatchRows(cycleRows, start, count);
         console.log(
-            `[LABELS] Motor workplace — batching by order.quantity=${order.quantity}: ${cycleRows.length} row(s) selected`,
+            `[LABELS] Motor workplace — cycle ${cycleIndex}/${totalCycles} batch: ` +
+                `units ${start + 1}-${start + count} of ${order.quantity} (maxCycle=${order.maxCycle}): ${cycleRows.length} row(s) selected`,
         );
     } else {
         cycleRows = selectRowsForCycle(cycleRows, cycleIndex, totalCycles);
@@ -1422,12 +1439,16 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 
         // Non-motor entries no longer need a cycleFilter gate here — the
         // per-door / cycleFilter-fallback decision already happened inside
-        // selectRowsForCycle above, per row. The Motor workstation's
-        // cycleRows aren't cycle-filtered at all (see selectMotorBatchRows),
-        // so its entry still needs this gate to fire only once (normally
-        // cycleFilter "first") rather than re-printing the same batch on
-        // every subsequent cycle event for this order.
-        if (isMotorWorkplace) {
+        // selectRowsForCycle above, per row. A batching Motor order's
+        // cycleRows is now already cycle-scoped too (see usesMotorBatching
+        // above), so it doesn't need this gate either — an empty cycleRows
+        // slice already means nothing prints. Only the OLD single-pass
+        // Motor case (usesMotorBatching false) still needs it, to fire the
+        // one full-quantity batch just once (on the first cycle event)
+        // instead of re-printing it on every subsequent cycle event for
+        // the same order — the duplicate guard below can't catch that,
+        // since its key includes cycle_index.
+        if (isMotorWorkplace && !usesMotorBatching) {
             const cf = cycleFilterFromLastCycleNum(entry.lastCycleNum);
             if (cf === "first" && !isFirstCycle) continue;
             if (cf === "last" && !isLastCycle) continue;
@@ -1511,10 +1532,15 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 //   - "Cenová skupina" → if "C01" skip entirely
 // Maps rail type → QR PNG filename, prints PocetVrat copies.
 //
-// Printed on the SAME printer as documents (DOCUMENTS_PRINTER_HOST) via
-// documentPrinterService — the PNG is wrapped into a one-page PDF and sent
-// through the identical Ghostscript → raw-TCP pipeline. There is no
-// separate QR printer env var anymore.
+// The QR sticker belongs with the barcode label it follows, so it prints on
+// the SAME physical printer as that label — resolveWorkplacePrinter's
+// per-workplace host/UNC, not a separate/global printer. For a ZPL-language
+// workplace (e.g. Hardware), the PNG is fitted to the same label stock and
+// rendered as its own ^GFA label job (documentPrinterService.
+// renderPngAsZplLabel), then sent through the exact same sendToLabelPrinter
+// connection the barcode label just used. EZPL-language workplaces have no
+// equivalent raster path yet and fall back to the shared documents printer
+// (DOCUMENTS_PRINTER_HOST) — see printQrPng.
 //
 // Environment variables:
 //   LABEL_TMP_FILES_PATH   path to the TMP*.TXT files
@@ -1627,13 +1653,57 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
 }
 
 /**
- * Prints a QR PNG file N times, using the same printer and pipeline as
- * document printing (documentPrinterService: PNG → one-page PDF →
- * Ghostscript → raw TCP to DOCUMENTS_PRINTER_HOST).
+ * Prints a QR sticker PNG N times on the SAME physical printer that just
+ * printed `workplace`'s barcode label — not the shared documents printer.
  *
- * Equivalent to VBA: wordDoc.PrintOut repeated PocetVrat times.
+ * ZPL-language workplaces (resolveWorkplacePrinter's `lang`, e.g. Hardware):
+ * the PNG is fitted to the same label stock (PREP_LABEL_PAGE_WIDTH_PT/
+ * HEIGHT_PT — the ≈100×130mm media every Godex/Zebra label printer here
+ * uses) and rendered once as its own ^GFA label job, then sent `copies`
+ * times through the exact same sendToLabelPrinter connection the barcode
+ * label used (resolveWorkplacePrinter's per-workplace UNC/host).
+ *
+ * ponytail: EZPL-language workplaces have no raster-embedding path here —
+ * Godex's own graphic command isn't implemented, only Zebra's ^GFA is —
+ * so they fall back to the shared documents printer (DOCUMENTS_PRINTER_HOST)
+ * with a warning. Add an EZPL equivalent (mirroring pbmRawToZplLabel) if an
+ * EZPL-language workplace needs its QR sticker on the same printer too.
  */
-async function printQrPng(pngPath: string, copies: number): Promise<void> {
+async function printQrPng(
+    pngPath: string,
+    copies: number,
+    workplace: string,
+): Promise<void> {
+    const { uncPath, host, lang, dpi } = resolveWorkplacePrinter(workplace);
+    const printerConfigured = !!(uncPath || host);
+
+    if (lang === "zpl") {
+        if (!printerConfigured) {
+            console.log(
+                `[QR] [DRY RUN] No printer configured for workplace "${workplace}" — ` +
+                    `would print ${copies}x "${pngPath}" as a ZPL label`,
+            );
+            return;
+        }
+        console.log(
+            `[QR] Printing ${copies}x "${pngPath}" as a ZPL label — same printer as the "${workplace}" barcode label`,
+        );
+        const zplBuffer = await renderPngAsZplLabel(
+            pngPath,
+            PREP_LABEL_PAGE_WIDTH_PT,
+            PREP_LABEL_PAGE_HEIGHT_PT,
+            dpi,
+        );
+        for (let i = 0; i < copies; i++) {
+            await sendToLabelPrinter(zplBuffer, workplace);
+        }
+        return;
+    }
+
+    console.warn(
+        `[QR] Workplace "${workplace}" is EZPL-language — no same-printer QR path yet, ` +
+            "falling back to the shared documents printer",
+    );
     if (!DOCUMENTS_PRINTER_HOST) {
         console.log(
             `[QR] No printer configured (DOCUMENTS_PRINTER_HOST empty) — would print ${copies}x "${pngPath}"`,
@@ -1706,5 +1776,5 @@ export async function handleQrSticker(
     console.log(
         `[QR] Printing ${data.doorCount}x ${qrName}.png for rail type "${data.railType}"`,
     );
-    await printQrPng(pngPath, data.doorCount);
+    await printQrPng(pngPath, data.doorCount, order.workplace);
 }

@@ -1,17 +1,30 @@
 jest.mock("../../services/completionService");
 jest.mock("../../services/documentPrinterService");
+jest.mock("../../services/toorsService");
+// Keep motorCycleRange's real math (it's pure and is exactly what these
+// tests verify) but mock getOrderCycleSnapshot, which otherwise hits a
+// real DB via getDb().
+jest.mock("../../services/workstationService", () => ({
+    ...jest.requireActual("../../services/workstationService"),
+    getOrderCycleSnapshot: jest.fn(),
+}));
 
 import { Request, Response } from "express";
 import {
     createPrepLabel,
     createOrderCheck,
+    createOrderCompletion,
 } from "../../controllers/completionController";
 import {
     recordOrderPreparation,
     recordOrderCheck,
+    recordOrderCompletion,
     isValidCheckStatus,
+    isValidCompletionStatus,
 } from "../../services/completionService";
 import { buildPrepLabelPdf } from "../../services/documentPrinterService";
+import { closeOrderInToors } from "../../services/toorsService";
+import { getOrderCycleSnapshot } from "../../services/workstationService";
 
 describe("Completion Controller", () => {
     let mockRequest: Partial<Request>;
@@ -36,6 +49,9 @@ describe("Completion Controller", () => {
         // default and override per-test where the invalid-status path is
         // actually being exercised.
         (isValidCheckStatus as unknown as jest.Mock).mockReturnValue(true);
+        (isValidCompletionStatus as unknown as jest.Mock).mockReturnValue(true);
+        (closeOrderInToors as jest.Mock).mockResolvedValue({ success: true, order_number: "PO1" });
+        (getOrderCycleSnapshot as jest.Mock).mockResolvedValue(null);
     });
 
     describe("createPrepLabel", () => {
@@ -118,6 +134,89 @@ describe("Completion Controller", () => {
 
             expect(mockStatus).toHaveBeenCalledWith(500);
             expect(mockJson).toHaveBeenCalledWith({ error: "PDF build failed" });
+        });
+    });
+
+    describe("createOrderCompletion", () => {
+        it("closes exactly 1 unit in TOORS for a non-Motor workstation, even when the body's quantity is the order's full quantity", async () => {
+            mockRequest = {
+                body: {
+                    orderId: "order1",
+                    workstation: "Hardware",
+                    cycleIndex: 1,
+                    totalCycles: 20,
+                    productOrder: "PO1",
+                    employeeName: "Jan Novak",
+                    status: "complete",
+                    quantity: 20,
+                },
+            };
+
+            await createOrderCompletion(mockRequest as Request, mockResponse as Response);
+
+            expect(closeOrderInToors).toHaveBeenCalledWith("PO1", 1);
+        });
+
+        it("falls back to the body's quantity for Motor when no order snapshot is on record", async () => {
+            // getOrderCycleSnapshot resolves null (beforeEach default) — no
+            // workstation_log row for this order+cycle to re-derive from.
+            mockRequest = {
+                body: {
+                    orderId: "order1",
+                    workstation: "Motor",
+                    cycleIndex: 1,
+                    totalCycles: 1,
+                    productOrder: "PO1",
+                    employeeName: "Jan Novak",
+                    status: "complete",
+                    quantity: 20,
+                },
+            };
+
+            await createOrderCompletion(mockRequest as Request, mockResponse as Response);
+
+            expect(closeOrderInToors).toHaveBeenCalledWith("PO1", 20);
+        });
+
+        it("closes only THIS cycle's batch for Motor, re-derived from the recorded order snapshot — not the body's total quantity (the reported bug)", async () => {
+            // Order snapshot: quantity=9 total, maxCycle=5 → cycle 2/2 = the
+            // remaining 4, regardless of what quantity the mobile app sent.
+            (getOrderCycleSnapshot as jest.Mock).mockResolvedValue({ quantity: 9, maxCycle: 5 });
+            mockRequest = {
+                body: {
+                    orderId: "order1",
+                    workstation: "Motor",
+                    cycleIndex: 2,
+                    totalCycles: 2,
+                    productOrder: "PO1",
+                    employeeName: "Jan Novak",
+                    status: "complete",
+                    quantity: 9, // the order's raw total, same value on every cycle
+                },
+            };
+
+            await createOrderCompletion(mockRequest as Request, mockResponse as Response);
+
+            expect(getOrderCycleSnapshot).toHaveBeenCalledWith("order1", 2);
+            expect(closeOrderInToors).toHaveBeenCalledWith("PO1", 4);
+        });
+
+        it("does not call TOORS for a non-complete status", async () => {
+            mockRequest = {
+                body: {
+                    orderId: "order1",
+                    workstation: "Hardware",
+                    productOrder: "PO1",
+                    employeeName: "Jan Novak",
+                    status: "missing_product",
+                    quantity: 20,
+                },
+            };
+
+            await createOrderCompletion(mockRequest as Request, mockResponse as Response);
+
+            expect(recordOrderCompletion).toHaveBeenCalledTimes(1);
+            expect(closeOrderInToors).not.toHaveBeenCalled();
         });
     });
 

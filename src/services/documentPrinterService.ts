@@ -2,12 +2,21 @@
  * documentPrinterService.ts
  *
  * Shared "print to a network printer by IP" pipeline. Used by:
- *   - workstationService.ts   → PBOM/declaration/confirmation PDFs
- *   - labelPrintingService.ts → QR stickers (PNG, wrapped into a one-page PDF)
+ *   - workstationService.ts   → PBOM/declaration/confirmation PDFs, always
+ *                               via this pipeline to DOCUMENTS_PRINTER_HOST.
+ *   - labelPrintingService.ts → QR stickers (PNG, wrapped into a one-page
+ *                               PDF). For a ZPL-language workplace this is
+ *                               only the RENDER step (renderPngAsZplLabel) —
+ *                               the sticker is then sent over that
+ *                               workplace's own label-printer connection, so
+ *                               it comes out of the SAME printer as the
+ *                               barcode label, not DOCUMENTS_PRINTER_HOST.
+ *                               An EZPL-language workplace has no such path
+ *                               yet and falls back to DOCUMENTS_PRINTER_HOST
+ *                               (see labelPrintingService.printQrPng).
  *
- * Both target the SAME printer (DOCUMENTS_PRINTER_HOST) — there is
- * intentionally only one set of printer env vars now. Godex label printing
- * is unrelated and keeps its own UNC-share config in labelPrintingService.ts.
+ * Godex/Zebra label printing is otherwise unrelated and keeps its own
+ * UNC-share config in labelPrintingService.ts.
  *
  * How it works:
  *   1. Ghostscript renders the PDF into the printer's native page-
@@ -67,6 +76,16 @@ export const DOCUMENTS_PRINTER_DPI = parseInt(
     process.env.DOCUMENTS_PRINTER_DPI || "300",
     10,
 );
+
+// 100 mm × 130 mm label stock in points (1 mm = 72/25.4 pt) — the prep
+// label's own page size (see the "prep-station label PDF" section below),
+// and also the physical media loaded in the ZPL-language label printers
+// (e.g. Hardware's — EZPL ^W100/^Q130 in labelPrintingService.ts maps to
+// the same ≈794 × 1033 dot canvas at 203 dpi). Exported so a QR sticker PNG
+// can be fitted to this exact page size and printed on that SAME printer
+// right after the barcode label (see renderPngAsZplLabel).
+export const PREP_LABEL_PAGE_WIDTH_PT = 283.46;
+export const PREP_LABEL_PAGE_HEIGHT_PT = 368.5;
 
 // ─── Prep label printer (Godex / Zebra) ────────────────────────────────────────
 // Separate printer config for the prep label (project number barcode, employee
@@ -423,7 +442,7 @@ export async function printPrepLabelBuffer(pdfBuffer: Buffer): Promise<boolean> 
 // filter consumes directly, so the compressed PNG pixel data can be
 // embedded byte-for-byte without re-encoding it.
 
-interface PngInfo {
+export interface PngInfo {
     width: number;
     height: number;
     bitDepth: number;
@@ -493,39 +512,42 @@ function parsePng(buf: Buffer): PngInfo {
     };
 }
 
-/**
- * Builds a minimal single-page PDF containing the PNG at its native pixel
- * size, converted to points at 96 DPI (matches how the PNGs were exported).
- */
-function buildPdfFromPng(png: PngInfo): Buffer {
-    const DPI = 96;
-    const ptWidth = (png.width * 72) / DPI;
-    const ptHeight = (png.height * 72) / DPI;
-
-    let colorSpace: string;
-    if (png.colorType === 0) {
-        colorSpace = "/DeviceGray";
-    } else if (png.colorType === 2) {
-        colorSpace = "/DeviceRGB";
-    } else if (png.colorType === 3) {
+function pngColorSpace(png: PngInfo): string {
+    if (png.colorType === 0) return "/DeviceGray";
+    if (png.colorType === 2) return "/DeviceRGB";
+    if (png.colorType === 3) {
         if (!png.palette) throw new Error("PNG palette (PLTE) chunk missing");
         const hex = png.palette.toString("hex");
-        colorSpace = `[/Indexed /DeviceRGB ${png.palette.length / 3 - 1} <${hex}>]`;
-    } else {
-        throw new Error(`Unsupported PNG colorType ${png.colorType}`);
+        return `[/Indexed /DeviceRGB ${png.palette.length / 3 - 1} <${hex}>]`;
     }
+    throw new Error(`Unsupported PNG colorType ${png.colorType}`);
+}
 
+/**
+ * Assembles a minimal single-page PDF embedding the PNG's still-compressed
+ * IDAT stream directly (PDF's FlateDecode filter consumes it byte-for-byte,
+ * no re-encoding needed), on a page of the given size with the image placed
+ * via `contentStream`'s transform matrix. Shared by buildPdfFromPng (image's
+ * own native size) and buildPdfFromPngFitted (a fixed label page size).
+ */
+function assemblePngPdf(
+    png: PngInfo,
+    pageWidthPt: number,
+    pageHeightPt: number,
+    contentStream: string,
+): Buffer {
     const imageDictParts = [
         "<< /Type /XObject /Subtype /Image",
         `/Width ${png.width} /Height ${png.height}`,
         `/BitsPerComponent ${png.bitDepth}`,
-        `/ColorSpace ${colorSpace}`,
+        `/ColorSpace ${pngColorSpace(png)}`,
         "/Filter /FlateDecode",
         `/Length ${png.idat.length}`,
         ">>",
     ].join(" ");
 
-    const contentStream = `q ${ptWidth.toFixed(2)} 0 0 ${ptHeight.toFixed(2)} 0 0 cm /Im0 Do Q`;
+    const ptWidth = pageWidthPt;
+    const ptHeight = pageHeightPt;
 
     const objects: string[] = [];
     objects.push("<< /Type /Catalog /Pages 2 0 R >>"); // 1
@@ -578,6 +600,45 @@ function buildPdfFromPng(png: PngInfo): Buffer {
 }
 
 /**
+ * Builds a minimal single-page PDF containing the PNG at its native pixel
+ * size, converted to points at 96 DPI (matches how the PNGs were exported).
+ */
+function buildPdfFromPng(png: PngInfo): Buffer {
+    const DPI = 96;
+    const ptWidth = (png.width * 72) / DPI;
+    const ptHeight = (png.height * 72) / DPI;
+    const contentStream = `q ${ptWidth.toFixed(2)} 0 0 ${ptHeight.toFixed(2)} 0 0 cm /Im0 Do Q`;
+    return assemblePngPdf(png, ptWidth, ptHeight, contentStream);
+}
+
+/**
+ * Builds a single-page PDF with the PNG scaled to FIT (preserving aspect
+ * ratio, centered — never distorted or cropped) inside a fixed
+ * pageWidthPt × pageHeightPt page, instead of the image's own native size.
+ * Used to print a QR sticker on the SAME physical label stock as the
+ * barcode label that triggered it (see PREP_LABEL_PAGE_WIDTH_PT/HEIGHT_PT
+ * and renderPngAsZplLabel), whatever resolution the source PNG was made at.
+ */
+export function buildPdfFromPngFitted(
+    png: PngInfo,
+    pageWidthPt: number,
+    pageHeightPt: number,
+): Buffer {
+    const DPI = 96;
+    const imgWidthPt = (png.width * 72) / DPI;
+    const imgHeightPt = (png.height * 72) / DPI;
+    const scale = Math.min(pageWidthPt / imgWidthPt, pageHeightPt / imgHeightPt);
+    const drawWidth = imgWidthPt * scale;
+    const drawHeight = imgHeightPt * scale;
+    const offsetX = (pageWidthPt - drawWidth) / 2;
+    const offsetY = (pageHeightPt - drawHeight) / 2;
+    const contentStream =
+        `q ${drawWidth.toFixed(2)} 0 0 ${drawHeight.toFixed(2)} ` +
+        `${offsetX.toFixed(2)} ${offsetY.toFixed(2)} cm /Im0 Do Q`;
+    return assemblePngPdf(png, pageWidthPt, pageHeightPt, contentStream);
+}
+
+/**
  * Converts a PNG file into a temp one-page PDF and returns its path.
  * Caller is responsible for deleting it (see printPngFile).
  */
@@ -613,6 +674,49 @@ export async function printPngFile(
     }
 }
 
+/**
+ * Converts a PNG file into a temp one-page PDF fitted to a fixed label
+ * page size (see buildPdfFromPngFitted) and returns its path. Caller is
+ * responsible for deleting it (see renderPngAsZplLabel).
+ */
+function pngFileToLabelPdf(
+    pngPath: string,
+    pageWidthPt: number,
+    pageHeightPt: number,
+): string {
+    const pngBuf = fs.readFileSync(pngPath);
+    const png = parsePng(pngBuf);
+    const pdfBuf = buildPdfFromPngFitted(png, pageWidthPt, pageHeightPt);
+    const tmpPath = path.join(
+        os.tmpdir(),
+        `qr-label-${crypto.randomBytes(8).toString("hex")}.pdf`,
+    );
+    fs.writeFileSync(tmpPath, pdfBuf);
+    return tmpPath;
+}
+
+/**
+ * Renders a PNG (e.g. a QR sticker) as a complete ZPL label job — fitted to
+ * pageWidthPt × pageHeightPt at `dpi` via Ghostscript's pbmraw device, then
+ * wrapped into a ^GFA graphic field by renderPdfToZplBuffer/pbmRawToZplLabel
+ * — for printing on a Zebra/ZPL-language label printer, same media as
+ * whatever barcode label triggered it. Caller sends the returned buffer
+ * (see labelPrintingService.sendToLabelPrinter); this only renders.
+ */
+export async function renderPngAsZplLabel(
+    pngPath: string,
+    pageWidthPt: number,
+    pageHeightPt: number,
+    dpi: number,
+): Promise<Buffer> {
+    const tmpPdfPath = pngFileToLabelPdf(pngPath, pageWidthPt, pageHeightPt);
+    try {
+        return await renderPdfToZplBuffer(tmpPdfPath, dpi);
+    } finally {
+        fs.unlink(tmpPdfPath, () => {});
+    }
+}
+
 // ─── prep-station label PDF ─────────────────────────────────────────────────
 //
 // Label PDF for the external-items prep station, sized for the Godex
@@ -634,10 +738,6 @@ export async function printPngFile(
 // PDF built-in fonts plus (when available) the embedded TrueType barcode
 // font — embedding is what makes the barcode print correctly on the
 // printer, which otherwise has no BC 3of9 Light installed.
-
-// 100 mm × 130 mm label stock in points (1 mm = 72/25.4 pt).
-const PREP_LABEL_PAGE_WIDTH_PT = 283.46;
-const PREP_LABEL_PAGE_HEIGHT_PT = 368.5;
 
 function escapePdfText(s: string): string {
     return s.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");

@@ -11,6 +11,8 @@ import {
 import { buildPrepLabelPdf, printPrepLabelBuffer } from "../services/documentPrinterService";
 import { getDb, getNormsDb } from "../config/database";
 import { closeOrderInToors } from "../services/toorsService";
+import { normalizeWorkplace } from "../utils/normalizeWorkplace";
+import { getOrderCycleSnapshot, motorCycleRange } from "../services/workstationService";
 
 /**
  * Looks up the sales order number from ptl_prep_queue using project number
@@ -151,8 +153,34 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
         // if TOORS is slow or down the 10s timeout keeps this bounded.
         let toorsResult: Awaited<ReturnType<typeof closeOrderInToors>> | null = null;
         if (status === "complete" && productOrder) {
-            const closeQty = typeof quantity === "number" && quantity > 1 ? Math.floor(quantity) : 1;
-            toorsResult = await closeOrderInToors(productOrder, closeQty);
+            // Only Motor batches multiple units into one completion call —
+            // every other workstation (Hardware included) closes exactly 1
+            // unit per cycle (see toorsService.ts's header comment).
+            const isMotor = normalizeWorkplace(workstation) === "motor";
+            let closeQty = 1;
+            if (isMotor) {
+                // The mobile app's `quantity` is just order.quantity, the
+                // order's raw TOTAL (see kiosk.tsx) — never this cycle's
+                // batch size. Re-derive the real per-cycle amount from the
+                // SAME order data (quantity + maxCycle) the printing path
+                // used for this exact cycle, via motorCycleRange, so
+                // printing and completion can never disagree.
+                const snapshot = await getOrderCycleSnapshot(orderId, cycleIndex);
+                if (snapshot) {
+                    closeQty = motorCycleRange(
+                        snapshot.quantity,
+                        snapshot.maxCycle,
+                        cycleIndex,
+                        totalCycles,
+                    ).count;
+                } else if (typeof quantity === "number" && quantity > 1) {
+                    // No snapshot on record (e.g. an order-update was never
+                    // logged for this cycle) — fall back to trusting the
+                    // mobile-sent quantity rather than closing nothing.
+                    closeQty = Math.floor(quantity);
+                }
+            }
+            toorsResult = await closeOrderInToors(productOrder, Math.max(1, closeQty));
         }
 
         res.status(201).json({

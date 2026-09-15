@@ -99,7 +99,7 @@ import {
 } from "../../services/labelPrintingService";
 import { getDb } from "../../config/database";
 import fs from "fs";
-import { OrderUpdate } from "../../services/workstationService";
+import { OrderUpdate, motorCycleRange } from "../../services/workstationService";
 
 function createDbMock() {
     const db = Object.assign(jest.fn(), {
@@ -427,8 +427,8 @@ describe("selectMotorBatchRows — real 2-door order (604427)", () => {
         (r) => r.labelType === "motor" || r.labelType === "mot_prisl2",
     );
 
-    it("prints every row of each type when quantity covers them all (the example from the request)", () => {
-        const result = selectMotorBatchRows(rows, 2);
+    it("selects every row of each type when the range covers them all", () => {
+        const result = selectMotorBatchRows(rows, 0, 2);
         expect(result).toHaveLength(4);
         expect(result.filter((r) => r.labelType === "motor")).toHaveLength(2);
         expect(result.filter((r) => r.labelType === "mot_prisl2")).toHaveLength(
@@ -436,8 +436,8 @@ describe("selectMotorBatchRows — real 2-door order (604427)", () => {
         );
     });
 
-    it("caps each type to the first `quantity` rows in CSV order when quantity is smaller", () => {
-        const result = selectMotorBatchRows(rows, 1);
+    it("takes only the first row of each type for start=0, count=1", () => {
+        const result = selectMotorBatchRows(rows, 0, 1);
         expect(result).toHaveLength(2);
         expect(result.find((r) => r.labelType === "motor")!.packageType).toBe(
             "Motor Cube 1/2",
@@ -447,14 +447,48 @@ describe("selectMotorBatchRows — real 2-door order (604427)", () => {
         ).toBe("Cube accessories 1/2");
     });
 
-    it("falls back to printing every row when quantity is missing or invalid", () => {
-        expect(selectMotorBatchRows(rows, 0)).toHaveLength(4);
-        expect(selectMotorBatchRows(rows, -1)).toHaveLength(4);
-        expect(selectMotorBatchRows(rows, undefined as any)).toHaveLength(4);
+    it("takes the SECOND row of each type for start=1, count=1 — a later batch's slice", () => {
+        const result = selectMotorBatchRows(rows, 1, 1);
+        expect(result).toHaveLength(2);
+        expect(result.find((r) => r.labelType === "motor")!.packageType).toBe(
+            "Motor Cube 2/2",
+        );
+        expect(
+            result.find((r) => r.labelType === "mot_prisl2")!.packageType,
+        ).toBe("Cube accessories 2/2");
     });
 
-    it("doesn't crash or duplicate rows when quantity exceeds what's available", () => {
-        expect(selectMotorBatchRows(rows, 10)).toHaveLength(4);
+    it("selects nothing for a non-positive count", () => {
+        expect(selectMotorBatchRows(rows, 0, 0)).toHaveLength(0);
+        expect(selectMotorBatchRows(rows, 0, -1)).toHaveLength(0);
+    });
+
+    it("doesn't crash or duplicate rows when the range exceeds what's available", () => {
+        expect(selectMotorBatchRows(rows, 0, 10)).toHaveLength(4);
+        expect(selectMotorBatchRows(rows, 5, 10)).toHaveLength(0);
+    });
+});
+
+describe("motorCycleRange", () => {
+    it("splits a 9-unit order into a 5-unit first cycle and a 4-unit remainder second cycle (the reported bug)", () => {
+        expect(motorCycleRange(9, 5, 1, 2)).toEqual({ start: 0, count: 5 });
+        expect(motorCycleRange(9, 5, 2, 2)).toEqual({ start: 5, count: 4 });
+    });
+
+    it("caps every non-last cycle at maxCycle even when more remain", () => {
+        expect(motorCycleRange(12, 5, 1, 3)).toEqual({ start: 0, count: 5 });
+        expect(motorCycleRange(12, 5, 2, 3)).toEqual({ start: 5, count: 5 });
+        expect(motorCycleRange(12, 5, 3, 3)).toEqual({ start: 10, count: 2 });
+    });
+
+    it("falls back to the whole quantity in one batch when maxCycle is missing or invalid", () => {
+        expect(motorCycleRange(9, undefined, 1, 2)).toEqual({ start: 0, count: 9 });
+        expect(motorCycleRange(9, 0, 1, 2)).toEqual({ start: 0, count: 9 });
+        expect(motorCycleRange(9, -1, 1, 2)).toEqual({ start: 0, count: 9 });
+    });
+
+    it("falls back to the whole quantity when there's only one cycle, even with maxCycle set", () => {
+        expect(motorCycleRange(9, 5, 1, 1)).toEqual({ start: 0, count: 9 });
     });
 });
 
@@ -493,5 +527,59 @@ describe("handleLabelPrinting — Motor workstation batch printing (integration)
             (args) => args[0] === "label_print_log",
         );
         expect(insertCalls.length).toBeGreaterThanOrEqual(4);
+    });
+
+    it("prints only THIS cycle's batch of doors, not the whole order, when maxCycle splits it across cycles (the reported bug)", async () => {
+        (fs.readFileSync as jest.Mock).mockImplementation((path: string) => {
+            if (typeof path === "string" && path.includes("country-codes.json"))
+                return sampleCountryCodes;
+            return order604427Csv;
+        });
+        (fs.existsSync as jest.Mock).mockReturnValue(true);
+
+        let inserted: any[] = [];
+        const db = Object.assign(jest.fn(), {
+            schema: { hasTable: jest.fn().mockResolvedValue(true) },
+        });
+        db.mockReturnValue({
+            where: () => ({ first: () => thenable(null) }),
+            insert: (row: any) => {
+                inserted.push(row);
+                return thenable(undefined);
+            },
+        });
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        const baseOrder = {
+            ...mockOrderUpdate.order,
+            workplace: "Motor",
+            salesOrder: "604427",
+            position: "020",
+            quantity: 2,
+            maxCycle: 1, // 1 door per cycle — a 2-door order needs 2 cycles
+        };
+
+        await handleLabelPrinting({
+            ...mockOrderUpdate,
+            order: baseOrder,
+            cycleIndex: 1,
+            totalCycles: 2,
+        });
+        const cycle1 = inserted.map((r) => r.package_type).sort();
+        inserted = [];
+
+        await handleLabelPrinting({
+            ...mockOrderUpdate,
+            order: baseOrder,
+            cycleIndex: 2,
+            totalCycles: 2,
+        });
+        const cycle2 = inserted.map((r) => r.package_type).sort();
+
+        // Each cycle prints exactly one door's labels, and the two cycles
+        // print DIFFERENT doors — not the same "all doors" batch twice,
+        // which is what order.quantity alone (ignoring maxCycle) produced.
+        expect(cycle1).toEqual(["Cube accessories 1/2", "Motor Cube 1/2"]);
+        expect(cycle2).toEqual(["Cube accessories 2/2", "Motor Cube 2/2"]);
     });
 });

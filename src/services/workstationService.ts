@@ -93,6 +93,72 @@ export function parseWorkstationSequence(name: string): number | null {
 }
 
 /**
+ * Computes which slice of a Motor-style batch order belongs to THIS cycle.
+ *
+ * order.quantity from the production system is always the order's FULL
+ * total (e.g. 9 motors across the whole order) — never how many are
+ * physically in front of the operator for this particular cycle. maxCycle
+ * is the batch cap: every cycle except the last takes exactly `maxCycle`
+ * units, and the last cycle takes whatever remains. E.g. quantity=9,
+ * maxCycle=5, totalCycles=2 → cycle 1 = units 1-5 (start=0, count=5),
+ * cycle 2 = units 6-9 (start=5, count=4).
+ *
+ * Used for BOTH label printing (labelPrintingService.selectMotorBatchRows,
+ * which needs `start` to slice the right rows out of the CSV) and TOORS
+ * completion (which only needs `count`, the number of units this cycle
+ * actually closes) — one formula, so the two can never disagree.
+ *
+ * Falls back to "everything, in one batch" (start=0, count=quantity) when
+ * maxCycle isn't a usable positive number or there's only one cycle —
+ * same as the pre-existing, unbatched behavior.
+ */
+export function motorCycleRange(
+    quantity: number,
+    maxCycle: number | undefined,
+    cycleIndex: number,
+    totalCycles: number,
+): { start: number; count: number } {
+    if (!maxCycle || maxCycle <= 0 || totalCycles <= 1) {
+        return { start: 0, count: Math.max(0, quantity || 0) };
+    }
+    const start = maxCycle * (cycleIndex - 1);
+    const remaining = Math.max(0, (quantity || 0) - start);
+    const isLastCycle = cycleIndex >= totalCycles;
+    return { start, count: isLastCycle ? remaining : Math.min(maxCycle, remaining) };
+}
+
+/**
+ * Looks up the order snapshot (quantity, maxCycle) that handleOrderUpdate
+ * recorded in workstation_log for a specific order+cycle. The mobile app's
+ * order-completion payload only carries order.quantity (the order's raw
+ * total, see kiosk.tsx) — it has no idea about per-cycle batching — so the
+ * completion endpoint re-derives the correct per-cycle amount itself from
+ * the SAME order data the printing path used, via motorCycleRange, instead
+ * of trusting whatever quantity the app echoes back.
+ */
+export async function getOrderCycleSnapshot(
+    orderId: string,
+    cycleIndex: number,
+): Promise<{ quantity: number; maxCycle: number } | null> {
+    const db = await getDb();
+    const row = await db("workstation_log")
+        .select("order_snapshot")
+        .where({ order_id: orderId, cycle_index: cycleIndex })
+        .orderBy("created_at", "desc")
+        .first();
+    if (!row?.order_snapshot) return null;
+    try {
+        const order = JSON.parse(row.order_snapshot);
+        return {
+            quantity: Number(order.quantity) || 0,
+            maxCycle: Number(order.maxCycle) || 0,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/**
  * Returns every cycle of an order that has STARTED but not yet FINISHED,
  * ascending by cycle_index, derived from workstation_log (which records
  * every event with its exact cycle_index — see handleOrderUpdate).
