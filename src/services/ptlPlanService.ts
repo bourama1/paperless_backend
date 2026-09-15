@@ -36,6 +36,7 @@ import path from "path";
 import { getDb, getMasterplanDb } from "../config/database";
 import { normalizeWorkplace } from "./labelPrintingService";
 import { resolveHardwareOrders } from "./hardwareOrderLookupService";
+import { OrderFileItem } from "./motorOrderService";
 
 const PTL_PLAN_FOLDER_PATH = process.env.PTL_PLAN_FOLDER_PATH || "";
 
@@ -175,6 +176,12 @@ async function ingestPlanFile(
     for (const row of rows) {
         const plannedDate = parsePlanDate(row.date);
         const hw = hardwareInfo.get(`${row.salesOrder}::${row.position}`);
+        // Only store a non-empty checklist — [] and "no order file resolved
+        // yet" should both read as "nothing to check" (see
+        // getNonPtlItemsForOrder), so there's no need to distinguish them
+        // in storage.
+        const nonPtlItems =
+            hw?.nonPtlItems && hw.nonPtlItems.length > 0 ? JSON.stringify(hw.nonPtlItems) : null;
         await db("ptl_prep_queue")
             .insert({
                 workplace: row.workplace,
@@ -188,6 +195,7 @@ async function ingestPlanFile(
                 source_file: filename,
                 product_order: hw?.productOrder ?? null,
                 hardware_type: hw?.hardwareType ?? null,
+                non_ptl_items: nonPtlItems,
                 updated_at: db.fn.now(),
             })
             .onConflict(["project_number", "position", "workplace"])
@@ -200,6 +208,7 @@ async function ingestPlanFile(
                 source_file: filename,
                 product_order: hw?.productOrder ?? null,
                 hardware_type: hw?.hardwareType ?? null,
+                non_ptl_items: nonPtlItems,
                 updated_at: db.fn.now(),
             });
         ingested++;
@@ -431,4 +440,99 @@ export async function getPrepQueueHardwareTypes(): Promise<string[]> {
         .whereNotNull("hardware_type")
         .orderBy("hardware_type");
     return rows.map((r: any) => r.hardware_type);
+}
+
+// ─── per-item prep checklist ────────────────────────────────────────────────
+//
+// Mirrors motorOrderService's isNonPtlOrder check, but at item granularity
+// and for the prep-queue workflow: an order's non-PTL items (see
+// hardwareOrderLookupService.resolveHardwareOrders, which computes them at
+// ingest time and ptlPlanService.ingestPlanFile stores on the queue row) are
+// the ones nobody in PTL/P2L will prepare automatically — a person has to
+// tap through each one by hand before the prep label can be printed.
+
+export interface PrepChecklistItem extends OrderFileItem {
+    checked: boolean;
+}
+
+export interface PrepChecklist {
+    items: PrepChecklistItem[];
+    /** True once every item is checked — including the (very common) case
+     *  of no items to check at all, so callers can gate a "print label"
+     *  button on this alone without special-casing an empty checklist. */
+    allPrepared: boolean;
+}
+
+/**
+ * Returns the non-PTL item checklist for one order (project_number +
+ * position), each annotated with whether it's already been tapped
+ * "prepared" (order_prep_item_log). An order with no resolved order file,
+ * or whose file had no non-PTL items, simply has an empty checklist —
+ * already fully "prepared" by definition.
+ */
+export async function getNonPtlItemsForOrder(
+    projectNumber: string,
+    position: string,
+): Promise<PrepChecklist> {
+    const db = await getDb();
+
+    const row = await db("ptl_prep_queue")
+        .where({ project_number: projectNumber, position })
+        .select("non_ptl_items")
+        .first();
+
+    if (!row?.non_ptl_items) {
+        return { items: [], allPrepared: true };
+    }
+
+    let items: OrderFileItem[];
+    try {
+        items = JSON.parse(row.non_ptl_items);
+    } catch (err: any) {
+        console.error(
+            `[PREP] Could not parse non_ptl_items for ${projectNumber}/${position}: ${err.message}`,
+        );
+        return { items: [], allPrepared: true };
+    }
+    if (items.length === 0) {
+        return { items: [], allPrepared: true };
+    }
+
+    const checkedRows: { item_id: string }[] = await db("order_prep_item_log")
+        .select("item_id")
+        .where({ project_number: projectNumber, position });
+    const checkedIds = new Set(checkedRows.map((r) => r.item_id));
+
+    const checklist = items.map((item) => ({
+        ...item,
+        checked: checkedIds.has(item.itemID),
+    }));
+
+    return { items: checklist, allPrepared: checklist.every((i) => i.checked) };
+}
+
+/**
+ * Marks one non-PTL item as prepared. Idempotent — order_prep_item_log is
+ * unique on (project_number, position, item_id), so tapping an
+ * already-checked item again is a harmless no-op rather than an error or a
+ * duplicate row.
+ */
+export async function recordPrepItemChecked(
+    projectNumber: string,
+    position: string,
+    itemId: string,
+    itemDesc: string | undefined,
+    employeeName: string,
+): Promise<void> {
+    const db = await getDb();
+    await db("order_prep_item_log")
+        .insert({
+            project_number: projectNumber,
+            position,
+            item_id: itemId,
+            item_desc: itemDesc ?? null,
+            employee_name: employeeName,
+        })
+        .onConflict(["project_number", "position", "item_id"])
+        .ignore();
 }

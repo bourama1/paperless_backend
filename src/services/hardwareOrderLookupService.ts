@@ -14,12 +14,20 @@
  * Their "id" field also tells us which hardware family the order is,
  * e.g. "Hardware (Indy)" or "Hardware (Guardy)".
  *
+ * Same file also carries the order's item list — every item's `itemID` is
+ * checked against parts.xlsx (the PTL parts database, via
+ * motorOrderService.getPartIds — the exact same check
+ * motorOrderService.isNonPtlOrder does for the Motor auto-finish workflow)
+ * so the prep queue can show a worker exactly which items P2L/PTL won't
+ * handle automatically and someone has to physically prepare by hand.
+ *
  * Reuses PICKBYLIGHT_BASE_PATH (see motorOrderService.ts) since it's the
  * same PickByLight share.
  */
 
 import fs from "fs";
 import path from "path";
+import { getPartIds, OrderFileItem } from "./motorOrderService";
 
 const PICKBYLIGHT_BASE =
     process.env.PICKBYLIGHT_BASE_PATH || "D:\\PickByLight";
@@ -41,6 +49,11 @@ export interface HardwareOrderInfo {
     // from "Hardware (Indy)". Null if the file has no "id" or it doesn't
     // match that "X (Y)" shape.
     hardwareType: string | null;
+    // Items from this order that do NOT appear in parts.xlsx — the ones a
+    // person has to physically prepare, since nothing in PTL/P2L will pick
+    // them up automatically. Empty when every item is a known PTL part, or
+    // when the file has no items.
+    nonPtlItems: OrderFileItem[];
 }
 
 /** Extracts "Indy" out of `"Hardware (Indy)"`. Falls back to the raw id. */
@@ -97,10 +110,25 @@ export function resolveHardwareOrders(
                 const raw = fs
                     .readFileSync(path.join(dir, filename), "utf-8")
                     .replace(/^﻿/, "");
-                const parsed = JSON.parse(raw) as { id?: string; productOrder?: string };
+                const parsed = JSON.parse(raw) as {
+                    id?: string;
+                    productOrder?: string;
+                    items?: OrderFileItem[];
+                };
+                const items = parsed.items || [];
+                const partIds = getPartIds();
+                // Fail open the same way isNonPtlOrder does: an empty/missing
+                // parts.xlsx means nothing can be confirmed as a known PTL
+                // part, so every item is treated as needing manual prep
+                // rather than silently hiding the whole checklist.
+                const nonPtlItems =
+                    partIds.size === 0 ?
+                        items
+                    :   items.filter((item) => !partIds.has(item.itemID.trim()));
                 result.set(key, {
                     productOrder: parsed.productOrder || productOrderFromName!,
                     hardwareType: parseHardwareType(parsed.id),
+                    nonPtlItems,
                 });
             } catch (err: any) {
                 console.error(`[HARDWARE] Could not read/parse ${filename}: ${err.message}`);

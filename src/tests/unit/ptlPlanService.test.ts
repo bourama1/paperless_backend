@@ -12,7 +12,12 @@ jest.mock("fs", () => {
     };
 });
 
-import { checkForNewPlan, getPrepQueue } from "../../services/ptlPlanService";
+import {
+    checkForNewPlan,
+    getPrepQueue,
+    getNonPtlItemsForOrder,
+    recordPrepItemChecked,
+} from "../../services/ptlPlanService";
 import { getDb, getMasterplanDb } from "../../config/database";
 import fs from "fs";
 
@@ -217,5 +222,126 @@ describe("getPrepQueue — Masterplan lock annotation", () => {
         // getMasterplanDb may or may not be called, but the db query itself
         // must not be called with an empty WHERE clause (that's a table scan).
         expect(mpMock).not.toHaveBeenCalled();
+    });
+});
+
+describe("getNonPtlItemsForOrder", () => {
+    const ITEMS = [
+        { itemID: "X1", itemDesc: "Bracket", itemQuantity: 2, unit: "pcs" },
+        { itemID: "X2", itemDesc: "Bolt", itemQuantity: 8, unit: "pcs" },
+    ];
+
+    afterEach(() => jest.clearAllMocks());
+
+    /** db("ptl_prep_queue").where(...).select(...).first() -> queueRow
+     *  db("order_prep_item_log").select(...).where(...) -> checkedRows */
+    function makeDb(queueRow: any, checkedRows: { item_id: string }[]) {
+        return jest.fn((table: string) => {
+            if (table === "ptl_prep_queue") {
+                const chain: any = {};
+                chain.where = jest.fn(() => chain);
+                chain.select = jest.fn(() => chain);
+                chain.first = jest.fn().mockResolvedValue(queueRow);
+                return chain;
+            }
+            if (table === "order_prep_item_log") {
+                const chain: any = { then: (resolve: any) => resolve(checkedRows) };
+                chain.select = jest.fn(() => chain);
+                chain.where = jest.fn(() => chain);
+                return chain;
+            }
+            throw new Error(`Unexpected table: ${table}`);
+        });
+    }
+
+    it("returns an empty, already-prepared checklist when the order has no queue row", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeDb(undefined, []));
+
+        const result = await getNonPtlItemsForOrder("PN1", "01");
+
+        expect(result).toEqual({ items: [], allPrepared: true });
+    });
+
+    it("returns an empty, already-prepared checklist when non_ptl_items is null", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeDb({ non_ptl_items: null }, []));
+
+        const result = await getNonPtlItemsForOrder("PN1", "01");
+
+        expect(result).toEqual({ items: [], allPrepared: true });
+    });
+
+    it("marks every item unchecked and allPrepared=false when none have been tapped yet", async () => {
+        (getDb as jest.Mock).mockResolvedValue(
+            makeDb({ non_ptl_items: JSON.stringify(ITEMS) }, []),
+        );
+
+        const result = await getNonPtlItemsForOrder("PN1", "01");
+
+        expect(result.allPrepared).toBe(false);
+        expect(result.items).toEqual([
+            { ...ITEMS[0], checked: false },
+            { ...ITEMS[1], checked: false },
+        ]);
+    });
+
+    it("marks only the items with a matching order_prep_item_log row as checked", async () => {
+        (getDb as jest.Mock).mockResolvedValue(
+            makeDb({ non_ptl_items: JSON.stringify(ITEMS) }, [{ item_id: "X1" }]),
+        );
+
+        const result = await getNonPtlItemsForOrder("PN1", "01");
+
+        expect(result.allPrepared).toBe(false);
+        expect(result.items.find((i) => i.itemID === "X1")?.checked).toBe(true);
+        expect(result.items.find((i) => i.itemID === "X2")?.checked).toBe(false);
+    });
+
+    it("reports allPrepared=true once every item is checked", async () => {
+        (getDb as jest.Mock).mockResolvedValue(
+            makeDb(
+                { non_ptl_items: JSON.stringify(ITEMS) },
+                [{ item_id: "X1" }, { item_id: "X2" }],
+            ),
+        );
+
+        const result = await getNonPtlItemsForOrder("PN1", "01");
+
+        expect(result.allPrepared).toBe(true);
+        expect(result.items.every((i) => i.checked)).toBe(true);
+    });
+
+    it("fails safe to an empty, already-prepared checklist on malformed JSON", async () => {
+        (getDb as jest.Mock).mockResolvedValue(makeDb({ non_ptl_items: "{not json" }, []));
+
+        const result = await getNonPtlItemsForOrder("PN1", "01");
+
+        expect(result).toEqual({ items: [], allPrepared: true });
+    });
+});
+
+describe("recordPrepItemChecked", () => {
+    afterEach(() => jest.clearAllMocks());
+
+    it("inserts a row into order_prep_item_log and ignores a duplicate tap", async () => {
+        const ignore = jest.fn().mockResolvedValue(undefined);
+        const onConflict = jest.fn(() => ({ ignore }));
+        const insert = jest.fn(() => ({ onConflict }));
+        const db = jest.fn((table: string) => {
+            if (table === "order_prep_item_log") return { insert };
+            throw new Error(`Unexpected table: ${table}`);
+        });
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await recordPrepItemChecked("PN1", "01", "X1", "Bracket", "Jan Novak");
+
+        expect(insert).toHaveBeenCalledWith({
+            project_number: "PN1",
+            position: "01",
+            item_id: "X1",
+            item_desc: "Bracket",
+            employee_name: "Jan Novak",
+        });
+        expect(onConflict).toHaveBeenCalledWith(["project_number", "position", "item_id"]);
+        expect(ignore).toHaveBeenCalled();
     });
 });

@@ -4,6 +4,8 @@ import {
     getPrepQueue,
     getPrepQueueWorkplaces,
     getPrepQueueHardwareTypes,
+    getNonPtlItemsForOrder,
+    recordPrepItemChecked,
 } from "../services/ptlPlanService";
 
 export const listPrepQueue = async (req: Request, res: Response) => {
@@ -49,6 +51,37 @@ export const refreshPrepQueue = async (req: Request, res: Response) => {
         res.json(result);
     } catch (error) {
         console.error("Error refreshing prep queue:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const getPrepItems = async (req: Request, res: Response) => {
+    const { projectNumber, position } = req.query;
+    if (typeof projectNumber !== "string" || typeof position !== "string") {
+        return res.status(400).json({ error: "projectNumber and position are required" });
+    }
+    try {
+        const checklist = await getNonPtlItemsForOrder(projectNumber, position);
+        res.json(checklist);
+    } catch (error) {
+        console.error("Error fetching prep item checklist:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const checkPrepItem = async (req: Request, res: Response) => {
+    const { projectNumber, position, itemId, itemDesc, employeeName } = req.body;
+    if (!projectNumber || !position || !itemId || !employeeName) {
+        return res.status(400).json({
+            error: "projectNumber, position, itemId, and employeeName are required",
+        });
+    }
+    try {
+        await recordPrepItemChecked(projectNumber, position, itemId, itemDesc, employeeName);
+        const checklist = await getNonPtlItemsForOrder(projectNumber, position);
+        res.status(201).json(checklist);
+    } catch (error) {
+        console.error("Error recording prep item check:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 };

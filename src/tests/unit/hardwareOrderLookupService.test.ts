@@ -8,6 +8,10 @@ jest.mock("fs", () => ({
     ...jest.requireActual("fs"),
     readdirSync: jest.fn(),
     readFileSync: jest.fn(),
+    // No parts.xlsx in this test env — motorOrderService.getPartIds() then
+    // fails open (every item treated as non-PTL), deterministically rather
+    // than depending on whatever happens to be on the machine running this.
+    existsSync: jest.fn().mockReturnValue(false),
 }));
 
 beforeEach(() => {
@@ -110,6 +114,26 @@ describe("resolveHardwareOrders", () => {
 
         const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
         expect(result.get("604594::10")?.hardwareType).toBe("Indy");
+    });
+
+    it("captures the order's items as nonPtlItems (parts.xlsx isn't present in this test env, so everything fails open as non-PTL)", () => {
+        mockDirs({ STANDARD: ["604594_10_230018_Hardware.json"] });
+        const items = [
+            { itemID: "X1", itemDesc: "Bracket", itemQuantity: 2, unit: "pcs" },
+            { itemID: "X2", itemDesc: "Bolt", itemQuantity: 8, unit: "pcs" },
+        ];
+        (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify({ ...SAMPLE_FILE, items }));
+
+        const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
+        expect(result.get("604594::10")?.nonPtlItems).toEqual(items);
+    });
+
+    it("returns an empty nonPtlItems array when the order file has no items", () => {
+        mockDirs({ STANDARD: ["604594_10_230018_Hardware.json"] });
+        (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify(SAMPLE_FILE));
+
+        const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
+        expect(result.get("604594::10")?.nonPtlItems).toEqual([]);
     });
 
     it("falls back to the filename's productOrder segment if the file has no productOrder field", () => {

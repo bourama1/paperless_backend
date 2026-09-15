@@ -61,7 +61,7 @@ export function resolveOrderFilePath(linuxFilename: string): string | null {
     return null;
 }
 
-interface OrderFileItem {
+export interface OrderFileItem {
     itemID: string;
     itemDesc: string;
     itemQuantity: number;
@@ -143,7 +143,14 @@ export function loadPtlPartIds(): Set<string> {
 // file doesn't prevent the server from starting.
 let cachedPartIds: Set<string> | null = null;
 
-function getPartIds(): Set<string> {
+/**
+ * The known-in-PTL part ID set (parts.xlsx), cached in memory. Exported so
+ * other "is this item handled automatically by PTL/P2L, or does someone
+ * have to prepare it by hand" checks (e.g. hardwareOrderLookupService's
+ * per-item prep-queue check) reuse the exact same set instead of loading
+ * their own copy of parts.xlsx.
+ */
+export function getPartIds(): Set<string> {
     if (!cachedPartIds) {
         cachedPartIds = loadPtlPartIds();
     }

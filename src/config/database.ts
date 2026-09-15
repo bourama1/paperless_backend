@@ -521,4 +521,41 @@ const setupDatabase = async (targetDb: Knex) => {
             table.unique(["order_id", "cycle_index"]);
         });
     }
+
+    // 18. non_ptl_items column on ptl_prep_queue — JSON array of the order's
+    // items (itemID/itemDesc/itemQuantity/unit) that do NOT appear in
+    // parts.xlsx, i.e. the ones nobody in PTL/P2L will pick up automatically
+    // and a person has to prepare by hand. Populated at ingest time for
+    // Hardware rows (see ptlPlanService.ingestPlanFile /
+    // hardwareOrderLookupService.resolveHardwareOrders); null for rows with
+    // no resolved order file yet, or workplaces this hasn't been extended
+    // to. Stored as JSON text (not a normalized child table) since it's
+    // read as a whole checklist and never queried by individual item — same
+    // tradeoff as workstations.current_order_data.
+    if (!(await targetDb.schema.hasColumn("ptl_prep_queue", "non_ptl_items"))) {
+        await targetDb.schema.alterTable("ptl_prep_queue", (table) => {
+            table.text("non_ptl_items");
+        });
+    }
+
+    // 19. order_prep_item_log table — one row per non-PTL item a worker has
+    // tapped "prepared" on, in the prep-queue item checklist (see
+    // ptlPlanService.getNonPtlItemsForOrder / completionController). A row
+    // existing for (project_number, position, item_id) means that item is
+    // checked; the "Print label" action in the prep flow stays disabled
+    // until every item from non_ptl_items has a matching row here. Unique on
+    // the trio so tapping an already-checked item again is a harmless no-op
+    // rather than a growing log of duplicates.
+    if (!(await targetDb.schema.hasTable("order_prep_item_log"))) {
+        await targetDb.schema.createTable("order_prep_item_log", (table) => {
+            table.increments("id").primary();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.string("item_id").notNullable();
+            table.string("item_desc");
+            table.string("employee_name").notNullable();
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+            table.unique(["project_number", "position", "item_id"]);
+        });
+    }
 };
