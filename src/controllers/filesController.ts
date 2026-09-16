@@ -239,21 +239,25 @@ export const getDocumentById = async (req: Request, res: Response) => {
 };
 
 /**
- * Returns every document imported through the app that hasn't been
- * archived yet (see archivalService.ts), each annotated with:
+ * Returns every order/position that has reached one of the completion
+ * kiosk's finishing states and hasn't been archived yet (see
+ * archivalService.ts) — driven by order_completion_log, NOT by the
+ * "documents" table, so an order shows up here purely because the kiosk
+ * finished it, whether or not its BOM was ever opened/imported through the
+ * app's own preparation flow (document_id/document_name/document_type are
+ * null when it wasn't). Each item is annotated with:
+ *   - completed_at: when the kiosk operator actually finished this order —
+ *     use this for display, not created_at/updated_at (those only reflect
+ *     whenever/if someone happened to open the BOM in-app).
  *   - status: the most recent kiosk completion status for its
  *     projectNumber/position ("complete" | "complete_with_changes" |
  *     "missing_product" | "shipped_incomplete")
  *   - revisioned: whether it has an actual edited/annotated revision saved
- *     in-app (as opposed to just the original doc_manager import)
+ *     in-app (as opposed to just the original doc_manager import) — always
+ *     false when document_id is null.
  *   - checked / checked_cycles / total_cycles: the QC workflow — see
  *     getCheckStatusForPositions above. checked is true only once every
  *     cycle of that project/position has an "ok" order_cycle_checks row.
- *
- * Only documents whose project/position has actually reached one of the
- * kiosk finishing states are included at all — before that, there's
- * nothing to check yet, so there's no point surfacing it here (or marking
- * it "unchecked", which would be misleading rather than informative).
  *
  * Query params:
  *   status=complete,missing_product   comma-separated, OR'd together.
@@ -281,51 +285,62 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
             .groupBy("project_number", "position")
             .as("lc_max");
 
-        let query = db("documents as d")
-            .leftJoin("order_archive_log as oal", function (this: any) {
-                this.on("oal.project_number", "d.project_number").andOn(
-                    "oal.position",
-                    "d.position",
-                );
-            })
-            .leftJoin(latestCompletionMax, function (this: any) {
-                this.on("lc_max.project_number", "d.project_number").andOn(
-                    "lc_max.position",
-                    "d.position",
-                );
-            })
-            .leftJoin("order_completion_log as ocl", function (this: any) {
+        // Driven by order_completion_log, not by documents — a project/
+        // position belongs here purely because the completion kiosk
+        // finished it, whether or not anyone ever opened/imported its BOM
+        // through the app's own preparation flow (see the "documents" left
+        // join below, which is allowed to match nothing).
+        let query = db(latestCompletionMax)
+            .join("order_completion_log as ocl", function (this: any) {
                 this.on("ocl.project_number", "lc_max.project_number")
                     .andOn("ocl.position", "lc_max.position")
                     .andOn("ocl.created_at", "lc_max.max_created_at");
             })
-            // Not archived yet — either no archive row at all (order never
-            // tagged Complete), or a row that hasn't been archived yet.
-            .whereNull("oal.archived_at")
-            // Must have actually reached one of the kiosk finishing states
-            // (complete, complete_with_changes, missing_product,
-            // shipped_incomplete) — a project/position with no completion
-            // record yet hasn't gone through that process, so it has
-            // nothing to show or check here.
-            .whereNotNull("ocl.status")
+            .leftJoin("documents as d", function (this: any) {
+                this.on("d.project_number", "ocl.project_number").andOn(
+                    "d.position",
+                    "ocl.position",
+                );
+            })
+            // Not archived yet. A project/position can have more than one
+            // order_archive_log row (e.g. two Motor cycles sharing the same
+            // position) — whereNotExists rather than a join avoids fanning
+            // that out into duplicate result rows.
+            .whereNotExists(function (this: any) {
+                this.select(1)
+                    .from("order_archive_log as oal")
+                    .whereRaw("oal.project_number = ocl.project_number")
+                    .andWhereRaw("oal.position = ocl.position")
+                    .whereNotNull("oal.archived_at");
+            })
             .select(
                 "d.id as document_id",
                 "d.name as document_name",
-                "d.project_number",
-                "d.position",
+                "ocl.project_number",
+                "ocl.position",
+                "ocl.workstation",
                 "d.document_type",
                 "d.created_at",
                 "d.updated_at",
                 "ocl.status as latest_status",
+                // The actual thing the user cares about here — when the
+                // kiosk operator finished this order — as opposed to
+                // d.created_at/updated_at, which only reflect whenever
+                // someone happened to open/import the BOM in-app (if ever).
+                "ocl.created_at as completed_at",
             );
 
         if (statuses.length > 0) {
             query = query.whereIn("ocl.status", statuses);
         }
 
-        const rows = await query.orderBy("d.updated_at", "desc");
+        const rows = await query.orderBy("ocl.created_at", "desc");
 
-        const docIds = rows.map((r: any) => r.document_id);
+        // document_id can now be null (order finished but its BOM was never
+        // opened/imported in-app), so exclude those before querying revisions.
+        const docIds = rows
+            .map((r: any) => r.document_id)
+            .filter((id: any) => id != null);
         const revisionRows =
             docIds.length > 0
                 ? await db("revisions")
@@ -360,7 +375,8 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
         }
 
         let items = rows.map((row: any) => {
-            const revisions = revisionsByDoc.get(row.document_id) || [];
+            const revisions =
+                row.document_id != null ? revisionsByDoc.get(row.document_id) || [] : [];
             const revisioned = revisions.some((r) => r.is_edited);
             const check = checkStatusByPosition.get(
                 `${row.project_number}||${row.position}`,
@@ -371,13 +387,15 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                 uncheckedCycles: [1],
             };
             return {
-                document_id: row.document_id,
-                document_name: row.document_name,
+                document_id: row.document_id ?? null,
+                document_name: row.document_name ?? null,
                 project_number: row.project_number,
                 position: row.position,
-                document_type: row.document_type,
-                created_at: row.created_at,
-                updated_at: row.updated_at,
+                workstation: row.workstation ?? null,
+                document_type: row.document_type ?? null,
+                created_at: row.created_at ?? row.completed_at,
+                updated_at: row.updated_at ?? row.completed_at,
+                completed_at: row.completed_at,
                 status: row.latest_status || null,
                 revisioned,
                 revisions,

@@ -54,9 +54,11 @@ describe("Files Controller", () => {
         function chainable(resolveValue: any) {
             const chain: any = {};
             for (const m of [
+                "join",
                 "leftJoin",
                 "whereNull",
                 "whereNotNull",
+                "whereNotExists",
                 "where",
                 "whereIn",
                 "select",
@@ -81,23 +83,30 @@ describe("Files Controller", () => {
                     document_name: "doc1.pdf",
                     project_number: "P1",
                     position: "10",
+                    workstation: "Hardware",
                     document_type: 14,
                     created_at: "2026-07-17T10:00:00Z",
                     updated_at: "2026-07-17T10:00:00Z",
                     latest_status: "complete",
+                    // The kiosk completion time — distinct from the
+                    // document's own created_at, which only reflects
+                    // whenever it happened to be opened/imported in-app.
+                    completed_at: "2026-07-17T09:55:00Z",
                 },
                 {
                     document_id: 2,
                     document_name: "doc2.pdf",
                     project_number: "P2",
                     position: "20",
+                    workstation: "Hardware",
                     document_type: 4,
                     created_at: "2026-07-17T12:00:00Z",
                     updated_at: "2026-07-17T12:00:00Z",
-                    // Not null — the query's whereNotNull("ocl.status")
-                    // means a real result row here always has a status;
-                    // see the two tests below for that filtering itself.
+                    // Every row always has a status now — the query joins
+                    // order_completion_log with an inner join, so it's
+                    // structurally guaranteed, not filtered at runtime.
                     latest_status: "missing_product",
+                    completed_at: "2026-07-17T11:58:00Z",
                 },
             ];
             // Pre-sorted version desc, matching the real ORDER BY version desc clause.
@@ -120,8 +129,8 @@ describe("Files Controller", () => {
                 },
             ];
 
-            const db = jest.fn((table: string) => {
-                if (table === "documents as d") return chainable(mockDocRows);
+            const db = jest.fn((table: any) => {
+                if (table === "subquery") return chainable(mockDocRows);
                 if (table === "revisions") return chainable(mockRevisionRows);
                 return chainable([]);
             });
@@ -139,9 +148,11 @@ describe("Files Controller", () => {
                         document_name: "doc1.pdf",
                         project_number: "P1",
                         position: "10",
+                        workstation: "Hardware",
                         document_type: 14,
                         created_at: "2026-07-17T10:00:00Z",
                         updated_at: "2026-07-17T10:00:00Z",
+                        completed_at: "2026-07-17T09:55:00Z",
                         status: "complete",
                         revisioned: true,
                         revisions: [
@@ -176,9 +187,11 @@ describe("Files Controller", () => {
                         document_name: "doc2.pdf",
                         project_number: "P2",
                         position: "20",
+                        workstation: "Hardware",
                         document_type: 4,
                         created_at: "2026-07-17T12:00:00Z",
                         updated_at: "2026-07-17T12:00:00Z",
+                        completed_at: "2026-07-17T11:58:00Z",
                         status: "missing_product",
                         revisioned: false,
                         revisions: [],
@@ -188,6 +201,53 @@ describe("Files Controller", () => {
                         unchecked_cycles: [1],
                     },
                 ],
+            });
+        });
+
+        it("includes an order that reached a kiosk finishing state even when its BOM was never opened/imported in-app (no documents row)", async () => {
+            mockRequest = { query: {} };
+
+            // No document_id/document_name/document_type/created_at/updated_at
+            // at all — order_completion_log is the only source for this row
+            // (the documents left join matched nothing).
+            const mockRows = [
+                {
+                    document_id: null,
+                    document_name: null,
+                    project_number: "P3",
+                    position: "30",
+                    workstation: "Motor",
+                    document_type: null,
+                    created_at: null,
+                    updated_at: null,
+                    latest_status: "complete",
+                    completed_at: "2026-09-16T11:46:28.220Z",
+                },
+            ];
+
+            const db = jest.fn((table: any) => {
+                if (table === "subquery") return chainable(mockRows);
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items).toHaveLength(1);
+            expect(result.items[0]).toMatchObject({
+                document_id: null,
+                document_name: null,
+                project_number: "P3",
+                position: "30",
+                workstation: "Motor",
+                status: "complete",
+                completed_at: "2026-09-16T11:46:28.220Z",
+                revisioned: false,
+                revisions: [],
             });
         });
 
@@ -204,42 +264,14 @@ describe("Files Controller", () => {
             expect(mockJson).toHaveBeenCalledWith({ items: [] });
         });
 
-        it("always excludes documents with no completion status recorded, even with no status filter applied", async () => {
-            mockRequest = { query: {} };
-
-            let capturedWhereNotNullArg: string | undefined;
-            const db = jest.fn((table: string) => {
-                if (table === "documents as d") {
-                    const chain = chainable([]);
-                    // Wrap whereNotNull to capture what it was called with,
-                    // while still behaving like the rest of the chain.
-                    const original = chain.whereNotNull;
-                    chain.whereNotNull = jest.fn((arg: string) => {
-                        capturedWhereNotNullArg = arg;
-                        return original(arg);
-                    });
-                    return chain;
-                }
-                return chainable([]);
-            });
-            (getDb as jest.Mock).mockResolvedValue(db);
-
-            await getDocumentsOverview(
-                mockRequest as Request,
-                mockResponse as Response,
-            );
-
-            expect(capturedWhereNotNullArg).toBe("ocl.status");
-        });
-
         it("filters by status via whereIn when a status query param is given", async () => {
             mockRequest = {
                 query: { status: "complete,complete_with_changes" },
             };
 
             let capturedWhereInArgs: [string, string[]] | undefined;
-            const db = jest.fn((table: string) => {
-                if (table === "documents as d") {
+            const db = jest.fn((table: any) => {
+                if (table === "subquery") {
                     const chain = chainable([]);
                     const original = chain.whereIn;
                     chain.whereIn = jest.fn(
@@ -311,7 +343,7 @@ describe("Files Controller", () => {
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockDocRows);
                 if (table === "revisions") return chainable(mockRevisionRows);
                 return chainable([]);
             });
@@ -344,7 +376,7 @@ describe("Files Controller", () => {
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockDocRows);
                 if (table === "revisions") return chainable([]);
                 if (table === "order_completion_log") {
                     // Real P2L cycle data says this position has 3 cycles —
@@ -436,7 +468,7 @@ describe("Files Controller", () => {
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockDocRows);
                 if (table === "revisions") return chainable([]);
                 if (table === "order_cycle_checks") {
                     // P1/10 fully checked (1/1 default cycle); P2/20 not checked at all.
@@ -484,7 +516,7 @@ describe("Files Controller", () => {
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "documents as d") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockDocRows);
                 if (table === "revisions") return chainable([]);
                 if (table === "order_cycle_checks") {
                     // Rows are returned newest-first (matches the real
