@@ -1,8 +1,12 @@
 jest.mock("../../services/ptlPlanService");
 
 import { Request, Response } from "express";
-import { getPrepItems, checkPrepItem } from "../../controllers/prepQueueController";
-import { getNonPtlItemsForOrder, recordPrepItemChecked } from "../../services/ptlPlanService";
+import { getPrepItems, checkPrepItem, uncheckPrepItem } from "../../controllers/prepQueueController";
+import {
+    getNonPtlItemsForOrder,
+    recordPrepItemChecked,
+    recordPrepItemUnchecked,
+} from "../../services/ptlPlanService";
 
 describe("Prep Queue Controller — item checklist", () => {
     let mockRequest: Partial<Request>;
@@ -85,6 +89,38 @@ describe("Prep Queue Controller — item checklist", () => {
             };
 
             await checkPrepItem(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(500);
+        });
+    });
+
+    describe("uncheckPrepItem", () => {
+        it("returns 400 when a required field is missing", async () => {
+            mockRequest = { body: { projectNumber: "PN1", position: "01" } };
+
+            await uncheckPrepItem(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(400);
+            expect(recordPrepItemUnchecked).not.toHaveBeenCalled();
+        });
+
+        it("records the uncheck and returns the updated checklist", async () => {
+            const checklist = { items: [{ itemID: "X1", checked: false }], allPrepared: false };
+            (getNonPtlItemsForOrder as jest.Mock).mockResolvedValue(checklist);
+            mockRequest = { body: { projectNumber: "PN1", position: "01", itemId: "X1" } };
+
+            await uncheckPrepItem(mockRequest as Request, mockResponse as Response);
+
+            expect(recordPrepItemUnchecked).toHaveBeenCalledWith("PN1", "01", "X1");
+            expect(mockStatus).toHaveBeenCalledWith(200);
+            expect(mockJson).toHaveBeenCalledWith(checklist);
+        });
+
+        it("returns 500 on a service error", async () => {
+            (recordPrepItemUnchecked as jest.Mock).mockRejectedValue(new Error("DB error"));
+            mockRequest = { body: { projectNumber: "PN1", position: "01", itemId: "X1" } };
+
+            await uncheckPrepItem(mockRequest as Request, mockResponse as Response);
 
             expect(mockStatus).toHaveBeenCalledWith(500);
         });

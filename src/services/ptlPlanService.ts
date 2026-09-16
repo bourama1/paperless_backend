@@ -536,3 +536,18 @@ export async function recordPrepItemChecked(
         .onConflict(["project_number", "position", "item_id"])
         .ignore();
 }
+
+/**
+ * Undoes a prep item check — e.g. a worker misclicked. Idempotent: deleting
+ * a row that isn't there (already unchecked) is a harmless no-op.
+ */
+export async function recordPrepItemUnchecked(
+    projectNumber: string,
+    position: string,
+    itemId: string,
+): Promise<void> {
+    const db = await getDb();
+    await db("order_prep_item_log")
+        .where({ project_number: projectNumber, position, item_id: itemId })
+        .del();
+}

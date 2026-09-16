@@ -17,6 +17,7 @@ import {
     getPrepQueue,
     getNonPtlItemsForOrder,
     recordPrepItemChecked,
+    recordPrepItemUnchecked,
 } from "../../services/ptlPlanService";
 import { getDb, getMasterplanDb } from "../../config/database";
 import fs from "fs";
@@ -343,5 +344,33 @@ describe("recordPrepItemChecked", () => {
         });
         expect(onConflict).toHaveBeenCalledWith(["project_number", "position", "item_id"]);
         expect(ignore).toHaveBeenCalled();
+    });
+});
+
+describe("recordPrepItemUnchecked", () => {
+    afterEach(() => jest.clearAllMocks());
+
+    it("deletes the matching order_prep_item_log row", async () => {
+        const del = jest.fn().mockResolvedValue(1);
+        const where = jest.fn(() => ({ del }));
+        const db = jest.fn((table: string) => {
+            if (table === "order_prep_item_log") return { where };
+            throw new Error(`Unexpected table: ${table}`);
+        });
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await recordPrepItemUnchecked("PN1", "01", "X1");
+
+        expect(where).toHaveBeenCalledWith({ project_number: "PN1", position: "01", item_id: "X1" });
+        expect(del).toHaveBeenCalled();
+    });
+
+    it("is a harmless no-op when the row doesn't exist (already unchecked)", async () => {
+        const del = jest.fn().mockResolvedValue(0);
+        const where = jest.fn(() => ({ del }));
+        const db = jest.fn(() => ({ where }));
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await expect(recordPrepItemUnchecked("PN1", "01", "X1")).resolves.not.toThrow();
     });
 });

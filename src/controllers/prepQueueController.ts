@@ -6,6 +6,7 @@ import {
     getPrepQueueHardwareTypes,
     getNonPtlItemsForOrder,
     recordPrepItemChecked,
+    recordPrepItemUnchecked,
 } from "../services/ptlPlanService";
 
 export const listPrepQueue = async (req: Request, res: Response) => {
@@ -82,6 +83,23 @@ export const checkPrepItem = async (req: Request, res: Response) => {
         res.status(201).json(checklist);
     } catch (error) {
         console.error("Error recording prep item check:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const uncheckPrepItem = async (req: Request, res: Response) => {
+    const { projectNumber, position, itemId } = req.body;
+    if (!projectNumber || !position || !itemId) {
+        return res.status(400).json({
+            error: "projectNumber, position, and itemId are required",
+        });
+    }
+    try {
+        await recordPrepItemUnchecked(projectNumber, position, itemId);
+        const checklist = await getNonPtlItemsForOrder(projectNumber, position);
+        res.status(200).json(checklist);
+    } catch (error) {
+        console.error("Error recording prep item uncheck:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 };
