@@ -48,12 +48,14 @@ import { getDb } from "./config/database";
 import { apiKeyAuth } from "./middleware/apiKeyAuth";
 import { createWebFrontendMiddleware } from "./middleware/webFrontend";
 import { redactApiKey } from "./utils/redactApiKey";
+import { initPrintSettings } from "./services/printSettingsService";
 
 import queueRoutes from "./routes/queue";
 import filesRoutes from "./routes/files";
 import workstationRoutes from "./routes/workstations";
 import employeesRoutes from "./routes/employees";
 import prepQueueRoutes from "./routes/prepQueue";
+import settingsRoutes from "./routes/settings";
 
 const app = express();
 
@@ -154,6 +156,7 @@ const initDb = async () => {
     try {
         await getDb();
         logger.info("DB", "Database initialized successfully");
+        await initPrintSettings();
     } catch (error) {
         logger.error("DB", "Failed to initialize database:", error);
     }
@@ -255,6 +258,7 @@ app.use("/files", filesRoutes);
 app.use("/workstations", workstationRoutes);
 app.use("/employees", employeesRoutes);
 app.use("/prep-queue", prepQueueRoutes);
+app.use("/settings", settingsRoutes);
 app.get("/health", (req, res) => {
     res.json({ status: "ok" });
 });

@@ -42,6 +42,7 @@ describe("isApiRequest", () => {
                 "/workstations",
                 "/employees",
                 "/prep-queue",
+                "/settings",
                 "/health",
             ]),
         );

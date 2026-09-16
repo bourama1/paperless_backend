@@ -43,6 +43,7 @@ import os from "os";
 import path from "path";
 import crypto from "crypto";
 import { GHOSTSCRIPT_BIN } from "./pdfaService";
+import { isPrintingEnabled } from "./printSettingsService";
 import {
     buildTrueTypeFontObjects,
     code39Geometry,
@@ -367,11 +368,12 @@ export async function printPdfFile(pdfPath: string): Promise<void> {
  * regardless of success or failure.
  *
  * Returns true if the label was sent to the printer, false if
- * PREP_LABEL_PRINTER_HOST is not configured (callers can then decide whether
- * to fall back to returning the PDF to the mobile app instead).
+ * PREP_LABEL_PRINTER_HOST is not configured OR printing is disabled via
+ * the live switch (see printSettingsService) — callers can then decide
+ * whether to fall back to returning the PDF to the mobile app instead.
  */
 export async function printPrepLabelBuffer(pdfBuffer: Buffer): Promise<boolean> {
-    if (!PREP_LABEL_PRINTER_HOST) {
+    if (!PREP_LABEL_PRINTER_HOST || !isPrintingEnabled()) {
         return false;
     }
 

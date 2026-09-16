@@ -558,4 +558,19 @@ const setupDatabase = async (targetDb: Knex) => {
             table.unique(["project_number", "position", "item_id"]);
         });
     }
+
+    // 20. print_settings table — a single-row live on/off switch for all
+    // printing (labels, QR stickers, PBOM/declaration/confirmation
+    // documents, prep labels), see services/printSettingsService.ts. Lets
+    // printing be disabled/re-enabled from a running server without a
+    // restart (e.g. while testing on a tablet, to avoid wasting real
+    // labels) — every print call site checks this immediately before
+    // sending bytes to a physical printer.
+    if (!(await targetDb.schema.hasTable("print_settings"))) {
+        await targetDb.schema.createTable("print_settings", (table) => {
+            table.integer("id").primary();
+            table.boolean("enabled").notNullable().defaultTo(true);
+            table.timestamp("updated_at").defaultTo(targetDb.fn.now());
+        });
+    }
 };

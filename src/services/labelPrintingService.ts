@@ -38,6 +38,7 @@ import {
     PREP_LABEL_PAGE_WIDTH_PT,
     PREP_LABEL_PAGE_HEIGHT_PT,
 } from "./documentPrinterService";
+import { isPrintingEnabled } from "./printSettingsService";
 
 // EU countries that use the 47-line simplified label (from parametry AM:AN)
 const EU_COUNTRIES = new Set([
@@ -1475,7 +1476,8 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                 lang: wpLang,
                 dpi: wpDpi,
             } = resolveWorkplacePrinter(order.workplace);
-            const printerConfigured = !!(wpUnc || wpHost);
+            const hardwareConfigured = !!(wpUnc || wpHost);
+            const shouldPrint = hardwareConfigured && isPrintingEnabled();
 
             try {
                 const labelData =
@@ -1483,9 +1485,10 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                         ? generateZpl(row, config.template, wpDpi)
                         : generateEzpl(row, config.template);
 
-                if (!printerConfigured) {
+                if (!shouldPrint) {
+                    const reason = !hardwareConfigured ? "no printer configured" : "printing disabled via live config";
                     console.log(
-                        `[LABELS] [DRY RUN] ${copies}x ${config.template} | ` +
+                        `[LABELS] [DRY RUN] (${reason}) ${copies}x ${config.template} | ` +
                             `${row.labelType} | ${row.salesOrder}/${row.position} | ` +
                             `${row.packagePart} ${row.packageType} | ${row.customerName}`,
                     );
@@ -1498,7 +1501,7 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
                 await recordPrint(order._id, row, copies, cycleIndex);
                 printed++;
                 console.log(
-                    `[LABELS] ${printerConfigured ? "Printed" : "Dry-run"} ${copies}x ` +
+                    `[LABELS] ${shouldPrint ? "Printed" : "Dry-run"} ${copies}x ` +
                         `${config.template} – ${row.labelType} ${row.packagePart} ${row.packageType}`,
                 );
             } catch (err: any) {
@@ -1675,13 +1678,13 @@ async function printQrPng(
     workplace: string,
 ): Promise<void> {
     const { uncPath, host, lang, dpi } = resolveWorkplacePrinter(workplace);
-    const printerConfigured = !!(uncPath || host);
+    const hardwareConfigured = !!(uncPath || host);
 
     if (lang === "zpl") {
-        if (!printerConfigured) {
+        if (!hardwareConfigured || !isPrintingEnabled()) {
+            const reason = !hardwareConfigured ? `no printer configured for workplace "${workplace}"` : "printing disabled via live config";
             console.log(
-                `[QR] [DRY RUN] No printer configured for workplace "${workplace}" — ` +
-                    `would print ${copies}x "${pngPath}" as a ZPL label`,
+                `[QR] [DRY RUN] (${reason}) — would print ${copies}x "${pngPath}" as a ZPL label`,
             );
             return;
         }
@@ -1704,9 +1707,10 @@ async function printQrPng(
         `[QR] Workplace "${workplace}" is EZPL-language — no same-printer QR path yet, ` +
             "falling back to the shared documents printer",
     );
-    if (!DOCUMENTS_PRINTER_HOST) {
+    if (!DOCUMENTS_PRINTER_HOST || !isPrintingEnabled()) {
+        const reason = !DOCUMENTS_PRINTER_HOST ? "DOCUMENTS_PRINTER_HOST empty" : "printing disabled via live config";
         console.log(
-            `[QR] No printer configured (DOCUMENTS_PRINTER_HOST empty) — would print ${copies}x "${pngPath}"`,
+            `[QR] [DRY RUN] (${reason}) — would print ${copies}x "${pngPath}"`,
         );
         return;
     }

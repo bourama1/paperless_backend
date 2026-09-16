@@ -1,4 +1,8 @@
 jest.mock("../../config/database");
+// Auto-mocked so isPrintingEnabled defaults to undefined (falsy) unless a
+// test sets it — most tests want the REAL default (true), so beforeEach
+// resets it to that; only the kill-switch tests below override it.
+jest.mock("../../services/printSettingsService");
 
 const sampleCountryCodes = JSON.stringify({
     germany: "DE",
@@ -99,7 +103,17 @@ import {
 } from "../../services/labelPrintingService";
 import { getDb } from "../../config/database";
 import fs from "fs";
+import net from "net";
 import { OrderUpdate, motorCycleRange } from "../../services/workstationService";
+import { isPrintingEnabled } from "../../services/printSettingsService";
+
+// File-scope so it applies to every describe block below, not just ones
+// nested under "Label Printing Service" — printing is enabled by default
+// in real life, so that's the default here too; only the kill-switch
+// tests further down override it.
+beforeEach(() => {
+    (isPrintingEnabled as jest.Mock).mockReturnValue(true);
+});
 
 function createDbMock() {
     const db = Object.assign(jest.fn(), {
@@ -298,6 +312,40 @@ describe("Label Printing Service", () => {
             const labelRows = [{ tmpFile: "TMP123.TXT" } as any];
 
             await handleQrSticker(mockOrderUpdate, labelRows);
+        });
+    });
+
+    describe("print kill switch (isPrintingEnabled)", () => {
+        const originalHost = process.env.LABEL_PRINTER_HOST_HARDWARE;
+
+        afterEach(() => {
+            if (originalHost === undefined) delete process.env.LABEL_PRINTER_HOST_HARDWARE;
+            else process.env.LABEL_PRINTER_HOST_HARDWARE = originalHost;
+        });
+
+        it("suppresses the actual print even with a printer configured, when printing is disabled", async () => {
+            process.env.LABEL_PRINTER_HOST_HARDWARE = "10.0.0.5";
+            (isPrintingEnabled as jest.Mock).mockReturnValue(false);
+            const db = createDbMock();
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await handleLabelPrinting(mockOrderUpdate);
+
+            expect(net.Socket).not.toHaveBeenCalled();
+            // Still recorded as printed, matching the existing "no printer
+            // configured" dry-run behavior — see the main print loop.
+            expect(db).toHaveBeenCalledWith("label_print_log");
+        });
+
+        it("prints for real when a printer is configured and printing is enabled", async () => {
+            process.env.LABEL_PRINTER_HOST_HARDWARE = "10.0.0.5";
+            (isPrintingEnabled as jest.Mock).mockReturnValue(true);
+            const db = createDbMock();
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await handleLabelPrinting(mockOrderUpdate);
+
+            expect(net.Socket).toHaveBeenCalled();
         });
     });
 });

@@ -6,6 +6,7 @@ import crypto from "crypto";
 import { getDb } from "../config/database";
 import { handleLabelPrinting, normalizeWorkplace } from "./labelPrintingService";
 import { checkMotorOrderForAutoFinish } from "./motorOrderService";
+import { isPrintingEnabled } from "./printSettingsService";
 import {
     DOCUMENT_TYPES,
     BOM_DOCUMENT_TYPES,
@@ -877,9 +878,10 @@ async function triggerPrinting(
         }
     };
 
-    if (!DOCUMENTS_PRINTER_HOST) {
+    if (!DOCUMENTS_PRINTER_HOST || !isPrintingEnabled()) {
+        const reason = !DOCUMENTS_PRINTER_HOST ? "DOCUMENTS_PRINTER_HOST empty" : "printing disabled via live config";
         console.log(
-            `[PRINT] No printer configured (DOCUMENTS_PRINTER_HOST empty) — would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
+            `[PRINT] [DRY RUN] (${reason}) — would print ${filePaths.length} documents for order ${order.productOrder} (${order.salesOrder}/${order.position}):`,
         );
         for (const fp of filePaths) {
             console.log(`  - ${fp}`);

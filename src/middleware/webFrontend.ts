@@ -9,6 +9,7 @@ export const API_PATH_PREFIXES = [
     "/workstations",
     "/employees",
     "/prep-queue",
+    "/settings",
     "/health",
 ];
 
