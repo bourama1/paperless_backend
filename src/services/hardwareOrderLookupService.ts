@@ -16,10 +16,13 @@
  *
  * Same file also carries the order's item list — every item's `itemID` is
  * checked against parts.xlsx (the PTL parts database, via
- * motorOrderService.getPartIds — the exact same check
- * motorOrderService.isNonPtlOrder does for the Motor auto-finish workflow)
- * so the prep queue can show a worker exactly which items P2L/PTL won't
- * handle automatically and someone has to physically prepare by hand.
+ * motorOrderService.getPartIds/isKnownPtlPart — the exact same check
+ * motorOrderService.isNonPtlOrder does for the Motor auto-finish workflow,
+ * including its left/right-pair handling: a bare id like "T09-040-35-0031"
+ * counts as known when parts.xlsx only lists the suffixed "... L"/"... R"
+ * variants) so the prep queue can show a worker exactly which items
+ * P2L/PTL won't handle automatically and someone has to physically
+ * prepare by hand.
  *
  * Reuses PICKBYLIGHT_BASE_PATH (see motorOrderService.ts) since it's the
  * same PickByLight share.
@@ -27,7 +30,7 @@
 
 import fs from "fs";
 import path from "path";
-import { getPartIds, OrderFileItem } from "./motorOrderService";
+import { getPartIds, isKnownPtlPart, OrderFileItem } from "./motorOrderService";
 
 const PICKBYLIGHT_BASE =
     process.env.PICKBYLIGHT_BASE_PATH || "D:\\PickByLight";
@@ -124,7 +127,7 @@ export function resolveHardwareOrders(
                 const nonPtlItems =
                     partIds.size === 0 ?
                         items
-                    :   items.filter((item) => !partIds.has(item.itemID.trim()));
+                    :   items.filter((item) => !isKnownPtlPart(partIds, item.itemID));
                 result.set(key, {
                     productOrder: parsed.productOrder || productOrderFromName!,
                     hardwareType: parseHardwareType(parsed.id),

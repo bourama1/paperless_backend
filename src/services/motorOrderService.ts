@@ -164,6 +164,19 @@ export function clearPartsCache(): void {
 }
 
 /**
+ * Checks whether an item is tracked in PTL (parts.xlsx). Some parts are
+ * stocked as a left/right pair and are listed in parts.xlsx under
+ * suffixed ids ("T09-040-35-0031 L" / "T09-040-35-0031 R") rather than the
+ * bare id an order actually references — finding either suffixed variant
+ * is still good evidence PTL handles the part, so it's not something a
+ * person needs to prepare by hand.
+ */
+export function isKnownPtlPart(partIds: Set<string>, itemID: string): boolean {
+    const id = itemID.trim();
+    return partIds.has(id) || partIds.has(`${id} L`) || partIds.has(`${id} R`);
+}
+
+/**
  * Returns true when none of the order's items appear in parts.xlsx,
  * meaning this is a "special" (non-PTL) Motor order that needs to be
  * finished automatically via a synthetic FINISHED event.
@@ -175,7 +188,7 @@ export function isNonPtlOrder(orderFile: OrderFile): boolean {
         // (fail-safe: better to complete orders than to block them forever)
         return true;
     }
-    return !orderFile.items.some((item) => partIds.has(item.itemID.trim()));
+    return !orderFile.items.some((item) => isKnownPtlPart(partIds, item.itemID));
 }
 
 /**

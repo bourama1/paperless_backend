@@ -3,6 +3,7 @@ process.env.PICKBYLIGHT_BASE_PATH = "D:\\PickByLight";
 
 import fs from "fs";
 import { resolveHardwareOrders } from "../../services/hardwareOrderLookupService";
+import { getPartIds } from "../../services/motorOrderService";
 
 jest.mock("fs", () => ({
     ...jest.requireActual("fs"),
@@ -13,9 +14,17 @@ jest.mock("fs", () => ({
     // than depending on whatever happens to be on the machine running this.
     existsSync: jest.fn().mockReturnValue(false),
 }));
+// Keep isKnownPtlPart's real (pure) implementation but let tests control
+// getPartIds() directly — sidesteps mocking the xlsx file-loading path just
+// to exercise the actual "is this item in the set" matching logic.
+jest.mock("../../services/motorOrderService", () => ({
+    ...jest.requireActual("../../services/motorOrderService"),
+    getPartIds: jest.fn().mockReturnValue(new Set()),
+}));
 
 beforeEach(() => {
     jest.clearAllMocks();
+    (getPartIds as jest.Mock).mockReturnValue(new Set());
 });
 
 const SAMPLE_FILE = {
@@ -134,6 +143,21 @@ describe("resolveHardwareOrders", () => {
 
         const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
         expect(result.get("604594::10")?.nonPtlItems).toEqual([]);
+    });
+
+    it("does not flag an item as non-PTL when parts.xlsx only lists its left/right suffixed variants", () => {
+        (getPartIds as jest.Mock).mockReturnValue(new Set(["T09-040-35-0031 L", "T09-040-35-0031 R", "PLAIN-001"]));
+        mockDirs({ STANDARD: ["604594_10_230018_Hardware.json"] });
+        const items = [
+            { itemID: "T09-040-35-0031", itemDesc: "Pair bracket", itemQuantity: 1, unit: "pcs" },
+            { itemID: "PLAIN-001", itemDesc: "Known part", itemQuantity: 1, unit: "pcs" },
+            { itemID: "UNKNOWN-001", itemDesc: "Not in PTL", itemQuantity: 1, unit: "pcs" },
+        ];
+        (fs.readFileSync as jest.Mock).mockReturnValue(JSON.stringify({ ...SAMPLE_FILE, items }));
+
+        const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
+
+        expect(result.get("604594::10")?.nonPtlItems).toEqual([items[2]]);
     });
 
     it("falls back to the filename's productOrder segment if the file has no productOrder field", () => {

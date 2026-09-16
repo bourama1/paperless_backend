@@ -7,6 +7,7 @@ import {
     resolveOrderFilePath,
     readOrderFile,
     isNonPtlOrder,
+    isKnownPtlPart,
     checkMotorOrderForAutoFinish,
     clearPartsCache,
 } from "../../services/motorOrderService";
@@ -137,6 +138,35 @@ describe("isNonPtlOrder", () => {
     it("returns true when parts.xlsx is missing (fail-safe: don't block orders)", () => {
         (fs.existsSync as jest.Mock).mockReturnValue(false);
         expect(isNonPtlOrder(SAMPLE_ORDER)).toBe(true);
+    });
+
+    it("returns false (normal PTL) when an item is only listed as a left/right pair", () => {
+        // parts.xlsx has no bare "T09-051-10-0045", only the suffixed
+        // variants — the part is still handled by PTL, just stocked as a pair.
+        mockPartsXlsx(["T09-051-10-0045 L", "T09-051-10-0045 R"]);
+        expect(isNonPtlOrder(SAMPLE_ORDER)).toBe(false);
+    });
+});
+
+describe("isKnownPtlPart", () => {
+    it("matches an exact id", () => {
+        const partIds = new Set(["T09-040-35-0031"]);
+        expect(isKnownPtlPart(partIds, "T09-040-35-0031")).toBe(true);
+    });
+
+    it("matches a bare id against its left/right suffixed variants in parts.xlsx", () => {
+        const partIds = new Set(["T09-040-35-0031 L", "T09-040-35-0031 R"]);
+        expect(isKnownPtlPart(partIds, "T09-040-35-0031")).toBe(true);
+    });
+
+    it("still returns false for a genuinely unknown id", () => {
+        const partIds = new Set(["T09-040-35-0031 L", "T09-040-35-0031 R"]);
+        expect(isKnownPtlPart(partIds, "T09-999-99-9999")).toBe(false);
+    });
+
+    it("trims the id before matching", () => {
+        const partIds = new Set(["T09-040-35-0031"]);
+        expect(isKnownPtlPart(partIds, "  T09-040-35-0031  ")).toBe(true);
     });
 });
 
