@@ -3,7 +3,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import crypto from "crypto";
-import { getDb } from "../config/database";
+import { getDb, getNormsDb } from "../config/database";
 import { handleLabelPrinting, normalizeWorkplace } from "./labelPrintingService";
 import { checkMotorOrderForAutoFinish } from "./motorOrderService";
 import { isPrintingEnabled } from "./printSettingsService";
@@ -788,6 +788,61 @@ export const searchPbom = async (
     }
 
     return results;
+};
+
+/**
+ * Resolves a scanned prep-label barcode to a search result, for the mobile
+ * app's barcode scanner (Docs/Search tabs). The barcode encodes
+ * production_order_number when one was resolved, falling back to
+ * project_number otherwise (see documentPrinterService.buildPrepLabelPdf) —
+ * so this tries the production order number first (reverse of
+ * completionController.lookupProductionOrderNumber: vyr_obj -> zakazka/pozice
+ * via Norms' konfiguratory/txtfiles), then falls back to the same
+ * project/order-code search the manual Search tab already uses.
+ */
+export const resolveScan = async (
+    code: string,
+): Promise<PbomSearchResult[]> => {
+    const trimmed = code.trim();
+    if (!trimmed) return [];
+
+    try {
+        const normsDb = await getNormsDb();
+        const konfig = await normsDb("konfiguratory")
+            .whereRaw("LOWER(vyr_obj) = LOWER(?)", [trimmed])
+            .select("id_txtfile")
+            .first();
+
+        if (konfig?.id_txtfile) {
+            const txtfile = await normsDb("txtfiles")
+                .where({ id: konfig.id_txtfile })
+                .select("zakazka", "pozice")
+                .first();
+
+            if (txtfile?.zakazka && txtfile?.pozice) {
+                const types = await listAvailablePbomTypes(
+                    String(txtfile.zakazka),
+                    String(txtfile.pozice),
+                );
+                if (types.length > 0) {
+                    return [
+                        {
+                            customer_code: CUSTOMER_PRODUCTION,
+                            order_code: Number(txtfile.zakazka),
+                            position_code: Number(txtfile.pozice),
+                        },
+                    ];
+                }
+            }
+        }
+    } catch (error) {
+        console.error("[SCAN] Norms reverse lookup failed:", error);
+    }
+
+    // Not a known production order number (or Norms is unavailable) — the
+    // barcode may have fallen back to project_number, which the existing
+    // search already matches.
+    return searchPbom(trimmed);
 };
 
 export interface PbomTypeOption {

@@ -19,9 +19,10 @@ import {
     handleOrderUpdate,
     importDocument,
     searchPbom,
+    resolveScan,
     OrderUpdate,
 } from "../../services/workstationService";
-import { getDb } from "../../config/database";
+import { getDb, getNormsDb } from "../../config/database";
 import { handleLabelPrinting } from "../../services/labelPrintingService";
 import axios from "axios";
 
@@ -488,6 +489,93 @@ describe("Workstation Service", () => {
             const results = await searchPbom("99999");
 
             expect(results).toEqual([]);
+        });
+    });
+
+    describe("resolveScan", () => {
+        // A chainable Knex-query-builder-shaped mock, resolving whatever
+        // .first() is asked to return — matches resolveScan's
+        // .whereRaw()/.where().select().first() usage.
+        function chain(firstValue: any) {
+            const c: any = {};
+            c.whereRaw = jest.fn().mockReturnValue(c);
+            c.where = jest.fn().mockReturnValue(c);
+            c.select = jest.fn().mockReturnValue(c);
+            c.first = jest.fn().mockResolvedValue(firstValue);
+            return c;
+        }
+
+        it("resolves via the Norms reverse lookup when the code matches a production order number", async () => {
+            const normsDb = jest.fn((table: string) => {
+                if (table === "konfiguratory") return chain({ id_txtfile: 42 });
+                if (table === "txtfiles")
+                    return chain({ zakazka: "12345", pozice: "01" });
+                return chain(undefined);
+            });
+            (getNormsDb as jest.Mock).mockResolvedValue(normsDb);
+            (axios.get as jest.Mock).mockResolvedValue({
+                status: 200,
+                data: { destroy: jest.fn() },
+            });
+
+            const results = await resolveScan("PROD-999");
+
+            expect(results).toEqual([
+                { customer_code: 0, order_code: 12345, position_code: 1 },
+            ]);
+            // Never falls through to the doc_manager order-list search once
+            // the Norms lookup already resolved it.
+            expect(axios.get).not.toHaveBeenCalledWith(
+                expect.stringContaining("/orders"),
+                expect.anything(),
+            );
+        });
+
+        it("falls back to the project/order-code search when the code isn't a known production order number", async () => {
+            (getNormsDb as jest.Mock).mockResolvedValue(
+                jest.fn(() => chain(undefined)),
+            );
+            (axios.get as jest.Mock).mockImplementation((url: string) => {
+                if (url.includes("/positions")) return Promise.resolve({ data: ["01"] });
+                if (url.includes("/orders")) return Promise.resolve({ data: ["12345"] });
+                if (url.includes("/api/documents/fetch"))
+                    return Promise.resolve({ status: 200, data: { destroy: jest.fn() } });
+                return Promise.resolve({ data: [] });
+            });
+
+            const results = await resolveScan("12345");
+
+            expect(results).toEqual([
+                { customer_code: 0, order_code: 12345, position_code: 1 },
+            ]);
+        });
+
+        it("returns an empty array when the code matches nothing anywhere", async () => {
+            (getNormsDb as jest.Mock).mockResolvedValue(
+                jest.fn(() => chain(undefined)),
+            );
+            (axios.get as jest.Mock).mockResolvedValue({ data: [] });
+
+            const results = await resolveScan("NOTHING");
+
+            expect(results).toEqual([]);
+        });
+
+        it("falls back to the search when the Norms database is unavailable", async () => {
+            (getNormsDb as jest.Mock).mockRejectedValue(new Error("connection refused"));
+            (axios.get as jest.Mock).mockImplementation((url: string) => {
+                if (url.includes("/positions")) return Promise.resolve({ data: ["01"] });
+                if (url.includes("/orders")) return Promise.resolve({ data: ["12345"] });
+                if (url.includes("/api/documents/fetch"))
+                    return Promise.resolve({ status: 200, data: { destroy: jest.fn() } });
+                return Promise.resolve({ data: [] });
+            });
+
+            const results = await resolveScan("12345");
+
+            expect(results).toEqual([
+                { customer_code: 0, order_code: 12345, position_code: 1 },
+            ]);
         });
     });
 });

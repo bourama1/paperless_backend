@@ -31,6 +31,7 @@ import {
     receiveOrderUpdate,
     importPbom,
     searchPbomHandler,
+    resolveScanHandler,
     getWorkstationLog,
     renderDocument,
     saveEdited,
@@ -40,6 +41,7 @@ import {
     handleOrderUpdate,
     importDocument,
     searchPbom,
+    resolveScan,
     getInFlightCyclesForOrder,
 } from "../../services/workstationService";
 import axios from "axios";
@@ -340,6 +342,61 @@ describe("Workstation Controller", () => {
             );
 
             await searchPbomHandler(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            expect(mockStatus).toHaveBeenCalledWith(500);
+            expect(mockJson).toHaveBeenCalledWith({
+                error: "Internal server error",
+            });
+        });
+    });
+
+    describe("resolveScanHandler", () => {
+        it("should return resolved results annotated with locked=false when nothing is locked", async () => {
+            mockRequest = { query: { code: "PROD-999" } };
+            const mockResults = [
+                { customer_code: 0, order_code: 12345, position_code: 1 },
+            ];
+            (resolveScan as jest.Mock).mockResolvedValue(mockResults);
+
+            const mpChain: any = { then: (resolve: any) => resolve([]) };
+            for (const m of ["where", "select", "orWhere"]) mpChain[m] = jest.fn(() => mpChain);
+            (getMasterplanDb as jest.Mock).mockResolvedValue(jest.fn(() => mpChain));
+
+            await resolveScanHandler(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            expect(resolveScan).toHaveBeenCalledWith("PROD-999");
+            expect(mockJson).toHaveBeenCalledWith([
+                { customer_code: 0, order_code: 12345, position_code: 1, locked: false },
+            ]);
+        });
+
+        it("should return 400 if code is missing", async () => {
+            mockRequest = { query: {} };
+
+            await resolveScanHandler(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            expect(mockStatus).toHaveBeenCalledWith(400);
+            expect(mockJson).toHaveBeenCalledWith({
+                error: "code query parameter is required",
+            });
+        });
+
+        it("should handle errors", async () => {
+            mockRequest = { query: { code: "PROD-999" } };
+            (resolveScan as jest.Mock).mockRejectedValue(
+                new Error("Resolve failed"),
+            );
+
+            await resolveScanHandler(
                 mockRequest as Request,
                 mockResponse as Response,
             );

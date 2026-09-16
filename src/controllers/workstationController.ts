@@ -6,9 +6,11 @@ import {
     OrderUpdate,
     importDocument,
     searchPbom,
+    resolveScan,
     listAvailablePbomTypes,
     parseWorkstationSequence,
     getInFlightCyclesForOrder,
+    PbomSearchResult,
 } from "../services/workstationService";
 import path from "path";
 import fs from "fs";
@@ -318,6 +320,25 @@ export const listPbomTypesHandler = async (req: Request, res: Response) => {
     }
 };
 
+// Annotates search-style results with lock status from Masterplan (same
+// check as the prep queue — vyroba.tisk_zamcen=1 means the order is locked).
+// The search/scan tabs still let users open the document (read-only access
+// for inspection remains useful), but show the red lock indicator so
+// workers know preparation is blocked before they navigate into it. Shared
+// by searchPbomHandler and resolveScanHandler so both stay in sync.
+async function annotateWithLockStatus(results: PbomSearchResult[]) {
+    const lockedKeys = await fetchLockedKeys(
+        results.map((r) => ({
+            project_number: String(r.order_code),
+            position: String(r.position_code),
+        })),
+    );
+    return results.map((r) => ({
+        ...r,
+        locked: lockedKeys.has(`${r.order_code}::${r.position_code}`),
+    }));
+}
+
 export const searchPbomHandler = async (req: Request, res: Response) => {
     const { order_code } = req.query;
 
@@ -329,27 +350,25 @@ export const searchPbomHandler = async (req: Request, res: Response) => {
 
     try {
         const results = await searchPbom(order_code as string);
-
-        // Annotate each result with lock status from Masterplan (same check
-        // as the prep queue — vyroba.tisk_zamcen=1 means the order is locked).
-        // The search tab still lets users open the document (read-only access
-        // for inspection remains useful), but shows the red lock indicator so
-        // workers know preparation is blocked before they navigate into it.
-        const lockedKeys = await fetchLockedKeys(
-            results.map((r) => ({
-                project_number: String(r.order_code),
-                position: String(r.position_code),
-            })),
-        );
-
-        const annotated = results.map((r) => ({
-            ...r,
-            locked: lockedKeys.has(`${r.order_code}::${r.position_code}`),
-        }));
-
-        res.json(annotated);
+        res.json(await annotateWithLockStatus(results));
     } catch (error) {
         console.error("Error searching PBOM:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const resolveScanHandler = async (req: Request, res: Response) => {
+    const { code } = req.query;
+
+    if (!code) {
+        return res.status(400).json({ error: "code query parameter is required" });
+    }
+
+    try {
+        const results = await resolveScan(code as string);
+        res.json(await annotateWithLockStatus(results));
+    } catch (error) {
+        console.error("Error resolving scanned code:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 };

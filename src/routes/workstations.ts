@@ -6,6 +6,7 @@ import {
     getWorkstationLog,
     importPbom,
     searchPbomHandler,
+    resolveScanHandler,
     listPbomTypesHandler,
     saveEdited,
     renderDocument,
@@ -24,6 +25,7 @@ router.post("/order-update", receiveOrderUpdate);
 router.get("/log", getWorkstationLog);
 router.post("/import-pbom", importPbom);
 router.get("/search-pbom", searchPbomHandler);
+router.get("/resolve-scan", resolveScanHandler);
 router.get("/pbom-types", listPbomTypesHandler);
 router.post("/order-completion", createOrderCompletion);
 router.post("/print-prep-label", createPrepLabel);
