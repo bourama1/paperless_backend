@@ -142,6 +142,58 @@ describe("ptlPlanService — retention pruning", () => {
         // when it finds no parseable source files to keep.
         expect(whereNotInSpy).not.toHaveBeenCalled();
     });
+
+    it("force re-ingests every currently-retained plan file, not just the latest", async () => {
+        (fs.readFileSync as jest.Mock).mockImplementation((filePath: string) => {
+            const tag =
+                filePath.includes(OLDEST_FILE) ? "OLDEST"
+                : filePath.includes(MIDDLE_FILE) ? "MIDDLE"
+                : filePath.includes(LATEST_FILE) ? "LATEST"
+                : null;
+            if (!tag) throw new Error(`Unexpected file read: ${filePath}`);
+            return JSON.stringify({
+                productionPlan: [{ ...samplePlan.productionPlan[0], position: tag }],
+            });
+        });
+
+        const ingestStateChain = makeChain(undefined);
+        ingestStateChain.where = jest.fn(() => ({
+            first: jest.fn().mockResolvedValue({ last_file_name: LATEST_FILE }),
+        }));
+        ingestStateChain.merge = jest.fn().mockResolvedValue(undefined);
+
+        const insertedPositions: string[] = [];
+        const prepQueueChain: any = {};
+        prepQueueChain.insert = jest.fn((row: any) => {
+            insertedPositions.push(row.position);
+            return prepQueueChain;
+        });
+        prepQueueChain.onConflict = jest.fn(() => prepQueueChain);
+        prepQueueChain.merge = jest.fn().mockResolvedValue(undefined);
+        prepQueueChain.distinct = jest.fn(() => prepQueueChain);
+        prepQueueChain.whereNotNull = jest.fn(() => ({
+            then: (resolve: any) => resolve([]),
+            whereNotIn: jest.fn(() => ({ del: jest.fn().mockResolvedValue(0) })),
+        }));
+
+        const db = Object.assign(
+            jest.fn((table: string) => {
+                if (table === "ptl_ingest_state") return ingestStateChain;
+                if (table === "ptl_prep_queue") return prepQueueChain;
+                throw new Error(`Unexpected table: ${table}`);
+            }),
+            { fn: { now: () => "NOW()" } },
+        );
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        const result = await checkForNewPlan(true);
+
+        expect(result.newFile).toBe(true);
+        expect(result.filename).toBe(LATEST_FILE);
+        // PTL_PLAN_RETAIN_FILES=2 -> MIDDLE and LATEST get re-ingested,
+        // OLDEST does not (matches what pruneOldPlanFiles keeps anyway).
+        expect(insertedPositions.sort()).toEqual(["LATEST", "MIDDLE"]);
+    });
 });
 
 describe("getPrepQueue — Masterplan lock annotation", () => {

@@ -90,23 +90,31 @@ function parsePlanDate(raw: string): string | null {
     return `${year}-${month}-${day}`;
 }
 
+/** Every productionPlanPTL.json in the watched folder, newest first. */
+function listPlanFilesByRecency(): { filename: string; fullPath: string }[] {
+    const entries = fs.readdirSync(PTL_PLAN_FOLDER_PATH);
+    return entries
+        .map((filename) => ({ filename, ts: parsePlanFilenameTimestamp(filename) }))
+        .filter((c): c is { filename: string; ts: Date } => c.ts !== null)
+        .sort((a, b) => b.ts.getTime() - a.ts.getTime())
+        .map((c) => ({ filename: c.filename, fullPath: path.join(PTL_PLAN_FOLDER_PATH, c.filename) }));
+}
+
 /** Finds the most recently-timestamped productionPlanPTL.json in the watched folder, if any. */
 function findLatestPlanFile(): { filename: string; fullPath: string } | null {
-    const entries = fs.readdirSync(PTL_PLAN_FOLDER_PATH);
-    const candidates = entries
-        .map((filename) => ({
-            filename,
-            ts: parsePlanFilenameTimestamp(filename),
-        }))
-        .filter((c): c is { filename: string; ts: Date } => c.ts !== null)
-        .sort((a, b) => b.ts.getTime() - a.ts.getTime());
+    return listPlanFilesByRecency()[0] ?? null;
+}
 
-    if (candidates.length === 0) return null;
-    const latest = candidates[0]!;
-    return {
-        filename: latest.filename,
-        fullPath: path.join(PTL_PLAN_FOLDER_PATH, latest.filename),
-    };
+/**
+ * The PTL_PLAN_RETAIN_FILES most-recently-timestamped plan files currently
+ * in the watched folder — the same set pruneOldPlanFiles keeps rows for.
+ * Used by a forced refresh (see checkForNewPlan) to re-ingest every plan
+ * the queue is currently retaining, not just the newest one — e.g. after a
+ * parts.xlsx update, so non_ptl_items gets recomputed for older-but-still-
+ * visible drops too, not just today's.
+ */
+function findRetainedPlanFiles(): { filename: string; fullPath: string }[] {
+    return listPlanFilesByRecency().slice(0, PTL_PLAN_RETAIN_FILES);
 }
 
 /**
@@ -242,9 +250,13 @@ async function ingestPlanFile(
 
 /**
  * Checks the watched folder for a plan file newer than the last one we
- * ingested, and ingests it if found. Pass force=true to re-ingest the
- * current latest file even if it's already the one on record (harmless —
- * ingestion is an upsert — and useful for the manual "check now" action).
+ * ingested, and ingests it if found. Pass force=true (the manual "check
+ * now"/refresh action) to instead re-ingest EVERY currently-retained plan
+ * file (the PTL_PLAN_RETAIN_FILES most recent ones — the same set that
+ * stays visible in the queue), not just the latest — harmless either way
+ * since ingestion is an upsert, and it's what actually re-syncs
+ * non_ptl_items/hardware lookups for older-but-still-visible drops too
+ * (e.g. after a parts.xlsx update).
  */
 export async function checkForNewPlan(force = false): Promise<{
     checked: boolean;
@@ -292,10 +304,29 @@ export async function checkForNewPlan(force = false): Promise<{
             return { checked: true, newFile: false, filename: latest.filename };
         }
 
+        if (force) {
+            // Oldest first, so the last iteration's ptl_ingest_state write
+            // (ingestPlanFile always overwrites it) ends up correctly
+            // pointing at the actual latest file, same as the single-file
+            // path below.
+            const retained = findRetainedPlanFiles();
+            let rowCount = 0;
+            for (const file of [...retained].reverse()) {
+                rowCount += await ingestPlanFile(file.filename, file.fullPath);
+            }
+            console.log(
+                `[PTL] Force-refreshed ${retained.length} retained plan file(s) — ingested ${rowCount} row(s) total`,
+            );
+            return {
+                checked: true,
+                newFile: true,
+                filename: latest.filename,
+                rowCount,
+            };
+        }
+
         const rowCount = await ingestPlanFile(latest.filename, latest.fullPath);
-        console.log(
-            `[PTL] ${force ? "Force-refreshed" : "New production plan file"}: ${latest.filename} — ingested ${rowCount} row(s)`,
-        );
+        console.log(`[PTL] New production plan file: ${latest.filename} — ingested ${rowCount} row(s)`);
         return {
             checked: true,
             newFile: true,
