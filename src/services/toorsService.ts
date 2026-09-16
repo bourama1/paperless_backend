@@ -6,8 +6,17 @@
  * recorded.
  *
  * The bridge is a separate Python/FastAPI service (status_bridge.exe) that
- * handles the multi-step HTTP session dance with the legacy PHP TOORS app —
- * we just send it one simple POST and it does the rest.
+ * handles the multi-step HTTP session dance with the legacy PHP TOORS app.
+ * As of the bridge's queue-based rewrite, POST /close-order no longer does
+ * that dance inline — it queues the job and returns 202 + a job id
+ * immediately, then a background worker in the bridge processes it in its
+ * own time (retrying every 30s, indefinitely, on a connection failure —
+ * see the bridge's own README "Queue and retries" section).
+ *
+ * This service only fires that POST and reports whether the job was
+ * QUEUED — it deliberately does not wait for or poll the eventual
+ * done/failed result. The kiosk operator moves on immediately; the ERP
+ * close happens in the background on the bridge's own schedule.
  *
  * Only orders with status="complete" are closed — "complete_with_changes",
  * "missing_product", "shipped_incomplete" are intentionally skipped.
@@ -29,24 +38,23 @@ import axios from "axios";
 const TOORS_SERVICE_URL = (process.env.TOORS_SERVICE_URL || "").replace(/\/$/, "");
 
 export interface ToorsCloseResult {
-    success: boolean;
+    /** True once the bridge has accepted the job into its queue — NOT
+     *  once it's actually closed in TOORS, which happens later and isn't
+     *  tracked here. */
+    queued: boolean;
     order_number: string;
-    /** Populated on success — what TOORS returned */
-    detail?: {
-        id: string;
-        planned: string;
-        closed_before: string;
-        quantity_entered: number;
-        result: string;
-    };
-    /** Populated on failure */
+    /** The bridge's queue job id, for looking it up later (GET
+     *  /queue/{job_id} on the bridge) if its outcome ever needs checking. */
+    job_id?: string;
+    /** Populated when the job could not even be queued (bridge
+     *  unreachable/misconfigured, etc.) */
     error?: string;
-    /** HTTP status from the bridge (404 = order not found, 502 = TOORS unreachable) */
-    status?: number;
 }
 
 /**
- * Closes a production order in TOORS via the status_bridge service.
+ * Queues a production order to be closed in TOORS via the status_bridge
+ * service. Returns as soon as the bridge accepts the job — does not wait
+ * for TOORS itself to actually process it.
  *
  * Always resolves (never throws) — ERP closing is best-effort and must
  * not affect the kiosk completion flow if TOORS or the bridge is down.
@@ -59,65 +67,31 @@ export async function closeOrderInToors(
         console.log(
             `[TOORS] TOORS_SERVICE_URL not set — skipping ERP close for order ${productOrder}`,
         );
-        return { success: false, order_number: productOrder, error: "TOORS_SERVICE_URL not configured" };
+        return { queued: false, order_number: productOrder, error: "TOORS_SERVICE_URL not configured" };
     }
 
     if (!productOrder) {
         console.warn("[TOORS] closeOrderInToors called with empty productOrder — skipping");
-        return { success: false, order_number: productOrder, error: "Empty product order number" };
+        return { queued: false, order_number: productOrder, error: "Empty product order number" };
     }
 
     const qty = Math.max(1, Math.floor(quantity));
 
     try {
-        console.log(`[TOORS] Closing order ${productOrder} (quantity: ${qty}) via ${TOORS_SERVICE_URL}`);
+        console.log(`[TOORS] Queuing close for order ${productOrder} (quantity: ${qty}) via ${TOORS_SERVICE_URL}`);
 
         const response = await axios.post(
             `${TOORS_SERVICE_URL}/close-order`,
             { order_number: productOrder, quantity: qty },
             { timeout: 10_000 },
         );
+        const jobId: string | undefined = response.data?.job_id;
 
-        const data = response.data;
-        console.log(
-            `[TOORS] Order ${productOrder} closed successfully. ` +
-                `Planned: ${data.planned}, closed before: ${data.closed_before}, result: ${data.result}`,
-        );
-
-        return {
-            success: true,
-            order_number: productOrder,
-            detail: {
-                id: data.id,
-                planned: data.planned,
-                closed_before: data.closed_before,
-                quantity_entered: data.quantity_entered,
-                result: data.result,
-            },
-        };
+        console.log(`[TOORS] Order ${productOrder} queued as job ${jobId} — not waiting for the result`);
+        return { queued: true, order_number: productOrder, ...(jobId ? { job_id: jobId } : {}) };
     } catch (err: any) {
-        const status = err?.response?.status;
         const detail = err?.response?.data?.detail || err?.message || String(err);
-
-        if (status === 404) {
-            console.warn(
-                `[TOORS] Order ${productOrder} not found in TOORS (404): ${detail}`,
-            );
-        } else if (status === 502) {
-            console.error(
-                `[TOORS] TOORS server unreachable when closing order ${productOrder} (502): ${detail}`,
-            );
-        } else {
-            console.error(
-                `[TOORS] Unexpected error closing order ${productOrder} (status ${status ?? "none"}): ${detail}`,
-            );
-        }
-
-        return {
-            success: false,
-            order_number: productOrder,
-            error: detail,
-            status,
-        };
+        console.error(`[TOORS] Failed to queue close for order ${productOrder}: ${detail}`);
+        return { queued: false, order_number: productOrder, error: detail };
     }
 }

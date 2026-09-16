@@ -50,7 +50,7 @@ describe("Completion Controller", () => {
         // actually being exercised.
         (isValidCheckStatus as unknown as jest.Mock).mockReturnValue(true);
         (isValidCompletionStatus as unknown as jest.Mock).mockReturnValue(true);
-        (closeOrderInToors as jest.Mock).mockResolvedValue({ success: true, order_number: "PO1" });
+        (closeOrderInToors as jest.Mock).mockResolvedValue({ queued: true, order_number: "PO1" });
         (getOrderCycleSnapshot as jest.Mock).mockResolvedValue(null);
     });
 

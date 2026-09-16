@@ -149,8 +149,9 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
         // Close the order in the ERP system (TOORS) when status is "complete".
         // Other statuses (complete_with_changes, missing_product, etc.) are
         // intentionally skipped — only clean completions are auto-closed.
-        // Awaited so the mobile app can show the worker whether it succeeded —
-        // if TOORS is slow or down the 10s timeout keeps this bounded.
+        // Awaited only long enough to confirm the bridge accepted the job
+        // (queued, not the actual TOORS close — see toorsService.ts) so the
+        // kiosk operator isn't kept waiting on TOORS itself.
         let toorsResult: Awaited<ReturnType<typeof closeOrderInToors>> | null = null;
         if (status === "complete" && productOrder) {
             // Only Motor batches multiple units into one completion call —
@@ -187,10 +188,8 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
             status: "ok",
             toors: toorsResult
                 ? {
-                      success: toorsResult.success,
+                      queued: toorsResult.queued,
                       error: toorsResult.error,
-                      detail: toorsResult.detail,
-                      status: toorsResult.status,
                   }
                 : null,
         });
