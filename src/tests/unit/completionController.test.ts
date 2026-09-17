@@ -15,6 +15,7 @@ import {
     createPrepLabel,
     createOrderCheck,
     createOrderCompletion,
+    getCompletionQueueHandler,
 } from "../../controllers/completionController";
 import {
     recordOrderPreparation,
@@ -22,6 +23,7 @@ import {
     recordOrderCompletion,
     isValidCheckStatus,
     isValidCompletionStatus,
+    getCompletionQueue,
 } from "../../services/completionService";
 import { buildPrepLabelPdf } from "../../services/documentPrinterService";
 import { closeOrderInToors } from "../../services/toorsService";
@@ -259,6 +261,37 @@ describe("Completion Controller", () => {
                 orderId: "order1",
                 cycleIndex: 1,
             });
+        });
+    });
+
+    describe("getCompletionQueueHandler", () => {
+        it("returns the queue for the given workplace", async () => {
+            const queue = [{ order: { _id: "order1" }, cycleIndex: 1, totalCycles: 1 }];
+            (getCompletionQueue as jest.Mock).mockResolvedValue(queue);
+            mockRequest = { query: { workplace: "Motor" } };
+
+            await getCompletionQueueHandler(mockRequest as Request, mockResponse as Response);
+
+            expect(getCompletionQueue).toHaveBeenCalledWith("Motor");
+            expect(mockJson).toHaveBeenCalledWith(queue);
+        });
+
+        it("passes undefined when no workplace filter is given", async () => {
+            (getCompletionQueue as jest.Mock).mockResolvedValue([]);
+            mockRequest = { query: {} };
+
+            await getCompletionQueueHandler(mockRequest as Request, mockResponse as Response);
+
+            expect(getCompletionQueue).toHaveBeenCalledWith(undefined);
+        });
+
+        it("returns 500 on a service error", async () => {
+            (getCompletionQueue as jest.Mock).mockRejectedValue(new Error("DB error"));
+            mockRequest = { query: {} };
+
+            await getCompletionQueueHandler(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(500);
         });
     });
 

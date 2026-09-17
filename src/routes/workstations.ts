@@ -13,6 +13,7 @@ import {
 } from "../controllers/workstationController";
 import {
     createOrderCompletion,
+    getCompletionQueueHandler,
     createPrepLabel,
     createOrderCheck,
 } from "../controllers/completionController";
@@ -28,6 +29,7 @@ router.get("/search-pbom", searchPbomHandler);
 router.get("/resolve-scan", resolveScanHandler);
 router.get("/pbom-types", listPbomTypesHandler);
 router.post("/order-completion", createOrderCompletion);
+router.get("/completion-queue", getCompletionQueueHandler);
 router.post("/print-prep-label", createPrepLabel);
 router.post("/order-check", createOrderCheck);
 router.post("/save-edited", saveEdited);

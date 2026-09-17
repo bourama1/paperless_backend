@@ -7,6 +7,7 @@ import {
     recordOrderCheck,
     isValidCompletionStatus,
     isValidCheckStatus,
+    getCompletionQueue,
 } from "../services/completionService";
 import { buildPrepLabelPdf, printPrepLabelBuffer } from "../services/documentPrinterService";
 import { getDb, getNormsDb } from "../config/database";
@@ -207,6 +208,23 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
         });
     } catch (error) {
         console.error("Error recording order completion:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+// The completion kiosk's durable backlog — see completionService.getCompletionQueue.
+// Called on mount and whenever the selected workplace changes, so a tablet
+// opening kiosk mode picks up anything finished while no tablet had it open.
+export const getCompletionQueueHandler = async (req: Request, res: Response) => {
+    const { workplace } = req.query;
+
+    try {
+        const queue = await getCompletionQueue(
+            typeof workplace === "string" ? workplace : undefined,
+        );
+        res.json(queue);
+    } catch (error) {
+        console.error("Error fetching completion queue:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 };

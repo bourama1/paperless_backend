@@ -11,3 +11,4 @@ deploy/
 publish/
 gs/
 web-dist/
+*.xlsx

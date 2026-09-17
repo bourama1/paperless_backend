@@ -15,6 +15,17 @@
  */
 
 import { getDb } from "../config/database";
+import { OrderUpdate } from "./workstationService";
+
+// How far back the completion queue looks for FINISHED orders that haven't
+// been completion-tagged yet (see getCompletionQueue below). Configurable
+// since workstation_log has been recording FINISHED events since long
+// before this feature existed — without a window, a stale gap from before
+// this shipped would resurface every order ever missed, forever.
+const COMPLETION_QUEUE_WINDOW_HOURS = parseInt(
+    process.env.COMPLETION_QUEUE_WINDOW_HOURS || "24",
+    10,
+);
 
 export interface Employee {
     id: number;
@@ -173,6 +184,56 @@ export const recordOrderPreparation = async (
         total_cycles: count,
     }));
     await db("order_preparation_log").insert(rows);
+};
+
+/**
+ * Orders that reached FINISHED at the given workplace (or any workplace)
+ * but haven't been completion-tagged yet — the kiosk's durable backlog.
+ * Previously the kiosk only ever learned about a FINISHED order via a live
+ * "workstation-order-update" socket event, so an order finishing while no
+ * tablet had kiosk mode open was missed forever. workstation_log already
+ * records every FINISHED event (see workstationService.handleOrderUpdate);
+ * this just reads back whichever of those don't yet have a matching
+ * order_completion_log row for that exact order_id + cycle_index.
+ *
+ * cycle_index is compared via COALESCE(...,1) on both sides: workstation_log
+ * defaults it to 1, but order_completion_log's column has no default and
+ * can be NULL for a completion submitted without one — a plain `=` would
+ * treat those as never matching and leave the entry stuck in the queue
+ * forever even once genuinely completed.
+ */
+export const getCompletionQueue = async (
+    workplace?: string,
+): Promise<OrderUpdate[]> => {
+    const db = await getDb();
+    const cutoff = new Date(Date.now() - COMPLETION_QUEUE_WINDOW_HOURS * 60 * 60 * 1000);
+
+    let query = db("workstation_log as wl")
+        .where("wl.action", "FINISHED")
+        .andWhere("wl.created_at", ">=", cutoff)
+        .whereNotExists(function (this: any) {
+            this.select(1)
+                .from("order_completion_log as ocl")
+                .whereRaw("ocl.order_id = wl.order_id")
+                .andWhereRaw(
+                    "coalesce(ocl.cycle_index, 1) = coalesce(wl.cycle_index, 1)",
+                );
+        });
+
+    if (workplace) {
+        query = query.andWhere("wl.workstation_name", workplace);
+    }
+
+    const rows = await query.select("wl.*").orderBy("wl.created_at", "asc");
+
+    return rows.map((row: any) => ({
+        order: JSON.parse(row.order_snapshot),
+        cycleIndex: row.cycle_index,
+        totalCycles: row.total_cycles,
+        _id: row.order_id,
+        datetime: row.created_at,
+        action: "FINISHED" as const,
+    }));
 };
 
 export const ORDER_CHECK_STATUSES = ["ok", "issue"] as const;

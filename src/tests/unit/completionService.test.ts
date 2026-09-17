@@ -1,7 +1,7 @@
 jest.mock("../../config/database");
 
 import { getDb } from "../../config/database";
-import { recordOrderCompletion } from "../../services/completionService";
+import { recordOrderCompletion, getCompletionQueue } from "../../services/completionService";
 import { thenable } from "../helpers/thenable";
 
 describe("completionService", () => {
@@ -137,5 +137,90 @@ describe("completionService", () => {
 
         expect(archiveDelete).toHaveBeenCalled();
         expect(archiveInsert).not.toHaveBeenCalled();
+    });
+});
+
+describe("getCompletionQueue", () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+    });
+
+    function chainableRows(rows: any[]) {
+        const chain: any = {};
+        for (const m of ["where", "andWhere", "whereNotExists", "select"]) {
+            chain[m] = jest.fn().mockReturnValue(chain);
+        }
+        chain.orderBy = jest.fn().mockResolvedValue(rows);
+        return chain;
+    }
+
+    it("reconstructs FINISHED workstation_log rows into OrderUpdate-shaped items", async () => {
+        const orderSnapshot = {
+            _id: "order1",
+            position: "10",
+            productOrder: "PO1",
+            projectNumber: "P1",
+            salesOrder: "SO1",
+            workplace: "Hardware",
+            customerDesc: "Acme",
+            productDesc: "Widget",
+            quantity: 1,
+        };
+        const chain = chainableRows([
+            {
+                order_id: "order1",
+                order_snapshot: JSON.stringify(orderSnapshot),
+                cycle_index: 1,
+                total_cycles: 1,
+                created_at: "2026-09-17T08:00:00.000Z",
+            },
+        ]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        const result = await getCompletionQueue();
+
+        expect(db).toHaveBeenCalledWith("workstation_log as wl");
+        expect(chain.where).toHaveBeenCalledWith("wl.action", "FINISHED");
+        expect(result).toEqual([
+            {
+                order: orderSnapshot,
+                cycleIndex: 1,
+                totalCycles: 1,
+                _id: "order1",
+                datetime: "2026-09-17T08:00:00.000Z",
+                action: "FINISHED",
+            },
+        ]);
+    });
+
+    it("filters by workplace when given", async () => {
+        const chain = chainableRows([]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await getCompletionQueue("Motor");
+
+        expect(chain.andWhere).toHaveBeenCalledWith("wl.workstation_name", "Motor");
+    });
+
+    it("does not filter by workplace when none is given", async () => {
+        const chain = chainableRows([]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await getCompletionQueue();
+
+        expect(chain.andWhere).not.toHaveBeenCalledWith("wl.workstation_name", expect.anything());
+    });
+
+    it("excludes anything already completion-tagged via whereNotExists", async () => {
+        const chain = chainableRows([]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await getCompletionQueue();
+
+        expect(chain.whereNotExists).toHaveBeenCalledWith(expect.any(Function));
     });
 });
