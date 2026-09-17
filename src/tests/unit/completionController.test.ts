@@ -8,6 +8,7 @@ jest.mock("../../services/workstationService", () => ({
     ...jest.requireActual("../../services/workstationService"),
     getOrderCycleSnapshot: jest.fn(),
 }));
+jest.mock("../../index", () => ({ io: { emit: jest.fn() } }));
 
 import { Request, Response } from "express";
 import {
@@ -25,6 +26,7 @@ import {
 import { buildPrepLabelPdf } from "../../services/documentPrinterService";
 import { closeOrderInToors } from "../../services/toorsService";
 import { getOrderCycleSnapshot } from "../../services/workstationService";
+import { io } from "../../index";
 
 describe("Completion Controller", () => {
     let mockRequest: Partial<Request>;
@@ -217,6 +219,46 @@ describe("Completion Controller", () => {
 
             expect(recordOrderCompletion).toHaveBeenCalledTimes(1);
             expect(closeOrderInToors).not.toHaveBeenCalled();
+        });
+
+        it("emits order-completed so a sibling kiosk tablet can drop this order/cycle from its queue", async () => {
+            mockRequest = {
+                body: {
+                    orderId: "order1",
+                    workstation: "Hardware",
+                    cycleIndex: 2,
+                    totalCycles: 3,
+                    productOrder: "PO1",
+                    employeeName: "Jan Novak",
+                    status: "complete",
+                },
+            };
+
+            await createOrderCompletion(mockRequest as Request, mockResponse as Response);
+
+            expect(io.emit).toHaveBeenCalledWith("order-completed", {
+                orderId: "order1",
+                cycleIndex: 2,
+            });
+        });
+
+        it("emits order-completed for a non-complete status too — any status means this cycle is resolved", async () => {
+            mockRequest = {
+                body: {
+                    orderId: "order1",
+                    workstation: "Hardware",
+                    cycleIndex: 1,
+                    employeeName: "Jan Novak",
+                    status: "missing_product",
+                },
+            };
+
+            await createOrderCompletion(mockRequest as Request, mockResponse as Response);
+
+            expect(io.emit).toHaveBeenCalledWith("order-completed", {
+                orderId: "order1",
+                cycleIndex: 1,
+            });
         });
     });
 

@@ -146,6 +146,18 @@ export const createOrderCompletion = async (req: Request, res: Response) => {
             status,
         });
 
+        // Tell any other completion kiosk tablet that might have this exact
+        // order/cycle queued or on screen (two tablets can run kiosk mode at
+        // once, in different physical locations) that it's resolved now —
+        // whatever the status, someone already handled this cycle, so a
+        // sibling tablet must drop it rather than let a worker complete it
+        // again. Matched on orderId + cycleIndex, not just orderId, since a
+        // multi-cycle order's other cycles are still genuinely pending.
+        const { io } = require("../index");
+        if (io) {
+            io.emit("order-completed", { orderId, cycleIndex });
+        }
+
         // Close the order in the ERP system (TOORS) when status is "complete".
         // Other statuses (complete_with_changes, missing_product, etc.) are
         // intentionally skipped — only clean completions are auto-closed.
