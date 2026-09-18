@@ -84,6 +84,7 @@ describe("Files Controller", () => {
                     project_number: "P1",
                     position: "10",
                     workstation: "Hardware",
+                    sales_order: "SO1",
                     latest_status: "complete",
                     // The kiosk completion time — distinct from the
                     // document's own created_at, which only reflects
@@ -94,6 +95,7 @@ describe("Files Controller", () => {
                     project_number: "P2",
                     position: "20",
                     workstation: "Hardware",
+                    sales_order: "SO2",
                     // Every row always has a status now — the query joins
                     // order_completion_log with an inner join, so it's
                     // structurally guaranteed, not filtered at runtime.
@@ -194,6 +196,7 @@ describe("Files Controller", () => {
                         // order_preparation_log/ptl_prep_queue rows in this
                         // mock -> getCheckStatusForPositions falls back to
                         // its defaults (1 cycle, none checked).
+                        sales_order: "SO1",
                         checked: false,
                         checked_cycles: 0,
                         total_cycles: 1,
@@ -209,6 +212,7 @@ describe("Files Controller", () => {
                         created_at: "2026-07-17T12:00:00Z",
                         updated_at: "2026-07-17T12:00:00Z",
                         completed_at: "2026-07-17T11:58:00Z",
+                        sales_order: "SO2",
                         status: "missing_product",
                         revisioned: false,
                         revisions: [],

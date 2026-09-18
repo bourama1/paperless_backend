@@ -323,6 +323,7 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                 "ocl.project_number",
                 "ocl.position",
                 "ocl.workstation",
+                "ocl.sales_order",
                 "ocl.status as latest_status",
                 // The actual thing the user cares about here — when the
                 // kiosk operator finished this order — as opposed to a
@@ -411,6 +412,7 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                 project_number: row.project_number,
                 position: row.position,
                 workstation: row.workstation ?? null,
+                sales_order: row.sales_order ?? null,
                 document_type: doc?.document_type ?? null,
                 created_at: doc?.created_at ?? row.completed_at,
                 updated_at: doc?.updated_at ?? row.completed_at,
