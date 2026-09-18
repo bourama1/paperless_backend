@@ -134,11 +134,29 @@ async function getPbomTypesForOrder(orderId: string): Promise<number[]> {
 }
 
 /**
+ * The archival upload service auto-ingests files matching
+ * "KM-SVM_<salesOrder>_<position>.pdf" — no document-type token in the
+ * name, so Hardware and Motor PBOMs for the SAME real position would
+ * otherwise collide on one filename. Motor's archived copy uses
+ * position+1 instead, so it always encodes to a distinct name (e.g.
+ * position "10" -> Hardware archives as "..._10.pdf", Motor as
+ * "..._11.pdf") — this only affects the archived FILENAME, not the real
+ * position used to fetch the document from doc_manager or the folder it's
+ * written into.
+ */
+function archivePositionFor(documentType: number, position: string): string {
+    if (documentType !== DOCUMENT_TYPES.PBOM_MOTOR) return position;
+    const n = parseInt(position, 10);
+    return Number.isNaN(n) ? position : String(n + 1);
+}
+
+/**
  * Archives one finished order: for each PBOM type actually relevant to this
  * order (see getPbomTypesForOrder — derived from which real production
  * workplaces it passed through), fetches that PBOM from doc_manager,
  * converts it to real PDF/A, and writes it to
- * ARCHIVE_SHARE_PATH/{projectNumber}/{position}/{pbomType}_pdfa.pdf.
+ * ARCHIVE_SHARE_PATH/{projectNumber}/{position}/KM-SVM_{salesOrder}_{archivePosition}.pdf
+ * (see archivePositionFor for the Hardware/Motor position offset).
  *
  * Only PBOM documents are archived — declarations, drawings, confirmations,
  * etc. are intentionally not part of retention archival.
@@ -184,7 +202,7 @@ async function archiveOrder(
         fs.writeFileSync(tmpInputPath, doc.buffer);
 
         try {
-            const outputFilename = `${documentTypeName(documentType)}_pdfa.pdf`;
+            const outputFilename = `KM-SVM_${row.sales_order}_${archivePositionFor(documentType, row.position)}.pdf`;
             const outputPath = path.join(orderDir, outputFilename);
 
             await convertToPdfA(tmpInputPath, outputPath, {

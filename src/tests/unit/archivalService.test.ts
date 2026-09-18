@@ -124,6 +124,52 @@ describe("archivalService", () => {
         );
     });
 
+    it("names archived files KM-SVM_<salesOrder>_<position>, bumping position by 1 for Motor so it never collides with Hardware's", async () => {
+        const row = {
+            id: 4,
+            order_id: "order-4",
+            project_number: "P123",
+            position: "10",
+            sales_order: "604473",
+            finished_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+            attempts: 0,
+        };
+        const updateFn = jest.fn(() => thenable(undefined));
+        const db = Object.assign(
+            jest.fn((table: string) => {
+                if (table === "order_archive_log") {
+                    return {
+                        ...makeArchiveLogQuery([row]),
+                        where: () => ({ update: updateFn }),
+                    };
+                }
+                if (table === "workstation_log") {
+                    return makeWorkstationLogQuery(["Hardware", "Motor"]);
+                }
+                return {};
+            }),
+            { fn: { now: () => "NOW()" } },
+        );
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        (axios.get as jest.Mock).mockResolvedValue({
+            status: 200,
+            headers: { "content-disposition": 'attachment; filename="doc.pdf"' },
+            data: Buffer.from("%PDF-fake"),
+        });
+        (convertToPdfA as jest.Mock).mockResolvedValue(undefined);
+
+        await runArchivalSweep();
+
+        const outputPaths = (convertToPdfA as jest.Mock).mock.calls.map((call) => call[1]);
+        expect(outputPaths).toEqual(
+            expect.arrayContaining([
+                expect.stringContaining(`KM-SVM_604473_10.pdf`),
+                expect.stringContaining(`KM-SVM_604473_11.pdf`),
+            ]),
+        );
+    });
+
     it("skips (not fails) document types doc_manager 404s on, but still archives the ones that exist", async () => {
         const row = {
             id: 2,
