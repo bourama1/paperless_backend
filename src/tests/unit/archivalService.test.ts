@@ -23,7 +23,9 @@ jest.mock("fs", () => {
 import { runArchivalSweep } from "../../services/archivalService";
 import { getDb } from "../../config/database";
 import axios from "axios";
+import fs from "fs";
 import { convertToPdfA } from "../../services/pdfaService";
+import { PDFDocument } from "pdf-lib";
 
 function thenable<T>(value: T) {
     return { then: (resolve: (v: T) => void) => resolve(value) };
@@ -53,6 +55,20 @@ function makeWorkstationLogQuery(workplaces: string[]) {
     };
 }
 
+// getCycleInfoForOrder's three lookups (order_completion_log,
+// order_preparation_log, order_cycle_checks) all end in .select() after
+// some combination of .where()/.whereIn()/.orderBy() — this generic chain
+// accepts any of those in any order and resolves empty by default, which
+// is enough for tests that aren't specifically exercising cycle info.
+function chainableEmpty(rows: any[] = []) {
+    const chain: any = {};
+    chain.where = () => chain;
+    chain.whereIn = () => chain;
+    chain.orderBy = () => chain;
+    chain.select = () => thenable(rows);
+    return chain;
+}
+
 describe("archivalService", () => {
     beforeEach(() => {
         jest.clearAllMocks();
@@ -64,7 +80,7 @@ describe("archivalService", () => {
             jest.fn((table: string) => {
                 if (table === "order_archive_log")
                     return { ...makeArchiveLogQuery([]), update } as any;
-                return {};
+                return chainableEmpty();
             }),
             { fn: { now: () => "NOW()" } },
         );
@@ -99,7 +115,7 @@ describe("archivalService", () => {
                     // resolves to two distinct PBOM types (14 and 15).
                     return makeWorkstationLogQuery(["Hardware", "Motor"]);
                 }
-                return {};
+                return chainableEmpty();
             }),
             { fn: { now: () => "NOW()" } },
         );
@@ -146,7 +162,7 @@ describe("archivalService", () => {
                 if (table === "workstation_log") {
                     return makeWorkstationLogQuery(["Hardware", "Motor"]);
                 }
-                return {};
+                return chainableEmpty();
             }),
             { fn: { now: () => "NOW()" } },
         );
@@ -170,6 +186,74 @@ describe("archivalService", () => {
         );
     });
 
+    it("stamps a per-cycle production record page (prepared/completed/checked by) onto the archived PDF", async () => {
+        const row = {
+            id: 5,
+            order_id: "order-5",
+            project_number: "P1",
+            position: "10",
+            sales_order: "SO1",
+            finished_at: new Date(Date.now() - 10 * 24 * 60 * 60 * 1000),
+            attempts: 0,
+        };
+        const updateFn = jest.fn(() => thenable(undefined));
+
+        // 2 cycles completed; only cycle 1 was prepared (matches how prep
+        // only applies to non-PTL items, not every cycle); both checked.
+        const completionRows = [
+            { cycle_index: 1, employee_name: "Petr Svoboda" },
+            { cycle_index: 2, employee_name: "Petr Svoboda" },
+        ];
+        const prepRows = [{ cycle_index: 1, employee_name: "Jan Novak" }];
+        const checkRows = [
+            { cycle_index: 1, employee_name: "Eva Kovacova" },
+            { cycle_index: 2, employee_name: "Eva Kovacova" },
+        ];
+
+        const db = Object.assign(
+            jest.fn((table: string) => {
+                if (table === "order_archive_log") {
+                    return {
+                        ...makeArchiveLogQuery([row]),
+                        where: () => ({ update: updateFn }),
+                    };
+                }
+                if (table === "workstation_log") return makeWorkstationLogQuery(["Hardware"]);
+                if (table === "order_completion_log") return chainableEmpty(completionRows);
+                if (table === "order_preparation_log") return chainableEmpty(prepRows);
+                if (table === "order_cycle_checks") return chainableEmpty(checkRows);
+                return chainableEmpty();
+            }),
+            { fn: { now: () => "NOW()" } },
+        );
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        // A real (tiny, valid) single-page PDF, built with the same
+        // (unmocked) pdf-lib the production code uses — proves the
+        // stamping path actually runs, not just falls back on a parse
+        // error the way it would for the other tests' fake "%PDF-fake" bytes.
+        const basePdf = await PDFDocument.create();
+        basePdf.addPage([200, 200]);
+        const basePdfBytes = await basePdf.save();
+
+        (axios.get as jest.Mock).mockResolvedValue({
+            status: 200,
+            headers: { "content-disposition": 'attachment; filename="doc.pdf"' },
+            data: Buffer.from(basePdfBytes),
+        });
+        (convertToPdfA as jest.Mock).mockResolvedValue(undefined);
+
+        await runArchivalSweep();
+
+        expect(convertToPdfA).toHaveBeenCalledTimes(1);
+        // The stamped buffer is what gets written to the Ghostscript input
+        // temp file — fs.writeFileSync is mocked, so its recorded argument
+        // is the actual stamped bytes to inspect.
+        const writtenBuffer = (fs.writeFileSync as jest.Mock).mock.calls[0][1];
+        const stampedDoc = await PDFDocument.load(writtenBuffer);
+        expect(stampedDoc.getPageCount()).toBe(2); // original page + 1 info page
+    });
+
     it("skips (not fails) document types doc_manager 404s on, but still archives the ones that exist", async () => {
         const row = {
             id: 2,
@@ -191,7 +275,7 @@ describe("archivalService", () => {
                 if (table === "workstation_log") {
                     return makeWorkstationLogQuery(["Hardware", "Motor"]);
                 }
-                return {};
+                return chainableEmpty();
             }),
             { fn: { now: () => "NOW()" } },
         );
@@ -244,7 +328,7 @@ describe("archivalService", () => {
                     // one fetch is still attempted (and fails, below).
                     return makeWorkstationLogQuery([]);
                 }
-                return {};
+                return chainableEmpty();
             }),
             { fn: { now: () => "NOW()" } },
         );

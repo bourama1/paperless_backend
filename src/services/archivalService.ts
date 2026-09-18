@@ -3,6 +3,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import crypto from "crypto";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 import { getDb } from "../config/database";
 import { DOC_MANAGER_URL } from "./workstationService";
 import {
@@ -150,6 +151,139 @@ function archivePositionFor(documentType: number, position: string): string {
     return Number.isNaN(n) ? position : String(n + 1);
 }
 
+interface CycleInfoRow {
+    cycleIndex: number;
+    preparedBy: string | null;
+    completedBy: string | null;
+    checkedBy: string | null;
+}
+
+/**
+ * Every cycle of this order has up to three people on record (see
+ * database.ts's comment on order_cycle_checks for the full picture):
+ *   - who prepared it     -> order_preparation_log (cycle_index)
+ *   - who ran the PTL cycle -> order_completion_log (cycle_index), keyed
+ *     by order_id since Hardware and Motor completions for the same
+ *     project/position are separate order_ids, not separate rows of one
+ *   - who checked it's OK -> order_cycle_checks (cycle_index)
+ * order_completion_log is the authoritative source for which cycles exist
+ * at all (that's what queued this order for archival in the first place);
+ * prep/check are matched in by project_number+position+cycle_index, same
+ * as everywhere else those tables are read (they don't carry a workstation
+ * column, so a prepared/checked record is shared across workstations for
+ * the same position — a pre-existing modeling limit, not new here).
+ * Each source can be re-recorded (a re-check, a re-print) — only the
+ * latest row per cycle_index is used.
+ */
+async function getCycleInfoForOrder(
+    orderId: string,
+    projectNumber: string,
+    position: string,
+): Promise<CycleInfoRow[]> {
+    const db = await getDb();
+
+    const completionRows: { cycle_index: number; employee_name: string }[] = await db(
+        "order_completion_log",
+    )
+        .where({ order_id: orderId })
+        .orderBy("created_at", "desc")
+        .select("cycle_index", "employee_name");
+
+    const completedByCycle = new Map<number, string>();
+    for (const r of completionRows) {
+        if (!completedByCycle.has(r.cycle_index)) {
+            completedByCycle.set(r.cycle_index, r.employee_name);
+        }
+    }
+
+    const cycleIndexes = Array.from(completedByCycle.keys()).sort((a, b) => a - b);
+    if (cycleIndexes.length === 0) return [];
+
+    const [prepRows, checkRows] = await Promise.all([
+        db("order_preparation_log")
+            .where({ project_number: projectNumber, position })
+            .whereIn("cycle_index", cycleIndexes)
+            .orderBy("created_at", "desc")
+            .select("cycle_index", "employee_name"),
+        db("order_cycle_checks")
+            .where({ project_number: projectNumber, position })
+            .whereIn("cycle_index", cycleIndexes)
+            .orderBy("created_at", "desc")
+            .select("cycle_index", "employee_name"),
+    ]);
+
+    const preparedByCycle = new Map<number, string>();
+    for (const r of prepRows as { cycle_index: number; employee_name: string }[]) {
+        if (!preparedByCycle.has(r.cycle_index)) preparedByCycle.set(r.cycle_index, r.employee_name);
+    }
+    const checkedByCycle = new Map<number, string>();
+    for (const r of checkRows as { cycle_index: number; employee_name: string }[]) {
+        if (!checkedByCycle.has(r.cycle_index)) checkedByCycle.set(r.cycle_index, r.employee_name);
+    }
+
+    return cycleIndexes.map((cycleIndex) => ({
+        cycleIndex,
+        preparedBy: preparedByCycle.get(cycleIndex) ?? null,
+        completedBy: completedByCycle.get(cycleIndex) ?? null,
+        checkedBy: checkedByCycle.get(cycleIndex) ?? null,
+    }));
+}
+
+const PAGE_WIDTH = 595.28; // A4 portrait, points
+const PAGE_HEIGHT = 841.89;
+const MARGIN = 40;
+const LINE_HEIGHT = 16;
+const TITLE_SIZE = 14;
+const BODY_SIZE = 10;
+
+/**
+ * Appends one or more pages listing who prepared/ran/checked each cycle
+ * (see getCycleInfoForOrder) to the end of the given PDF, before it's
+ * converted to PDF/A for archival. Uses a fixed-width Courier layout
+ * (padEnd-aligned columns) rather than drawing an actual table grid —
+ * plenty readable for a plain production record, and far less code.
+ * Returns the ORIGINAL bytes unchanged if there's nothing to add.
+ */
+async function appendCycleInfoPage(pdfBytes: Buffer, rows: CycleInfoRow[]): Promise<Buffer> {
+    if (rows.length === 0) return pdfBytes;
+
+    const pdfDoc = await PDFDocument.load(pdfBytes);
+    const font = await pdfDoc.embedFont(StandardFonts.Courier);
+    const boldFont = await pdfDoc.embedFont(StandardFonts.CourierBold);
+
+    const col = (s: string, w: number) => s.padEnd(w).slice(0, w);
+    const headerLine =
+        col("Cycle", 8) + col("Prepared by", 24) + col("Completed by (PTL)", 24) + col("Checked by", 24);
+
+    const rowsPerPage = Math.floor((PAGE_HEIGHT - MARGIN * 2 - (TITLE_SIZE + 14) - LINE_HEIGHT) / LINE_HEIGHT);
+
+    for (let i = 0; i < rows.length; i += rowsPerPage) {
+        const chunk = rows.slice(i, i + rowsPerPage);
+        const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+        let y = PAGE_HEIGHT - MARGIN;
+
+        if (i === 0) {
+            page.drawText("Production record", { x: MARGIN, y, size: TITLE_SIZE, font: boldFont });
+            y -= TITLE_SIZE + 14;
+        }
+
+        page.drawText(headerLine, { x: MARGIN, y, size: BODY_SIZE, font: boldFont });
+        y -= LINE_HEIGHT;
+
+        for (const row of chunk) {
+            const line =
+                col(String(row.cycleIndex), 8) +
+                col(row.preparedBy ?? "-", 24) +
+                col(row.completedBy ?? "-", 24) +
+                col(row.checkedBy ?? "-", 24);
+            page.drawText(line, { x: MARGIN, y, size: BODY_SIZE, font });
+            y -= LINE_HEIGHT;
+        }
+    }
+
+    return Buffer.from(await pdfDoc.save());
+}
+
 /**
  * Archives one finished order: for each PBOM type actually relevant to this
  * order (see getPbomTypesForOrder — derived from which real production
@@ -181,6 +315,8 @@ async function archiveOrder(
             `archiving PBOM type(s): ${pbomTypes.map(documentTypeName).join(", ")}`,
     );
 
+    const cycleInfo = await getCycleInfoForOrder(row.order_id, row.project_number, row.position);
+
     for (const documentType of pbomTypes) {
         const doc = await fetchDocumentBuffer(
             row.project_number,
@@ -195,11 +331,24 @@ async function archiveOrder(
             continue;
         }
 
+        // Best-effort: a stamping failure (e.g. a malformed source PDF
+        // pdf-lib can't parse) shouldn't block archiving the document
+        // itself — fall back to the unstamped original rather than losing
+        // the archive entirely.
+        let bufferToArchive = doc.buffer;
+        try {
+            bufferToArchive = await appendCycleInfoPage(doc.buffer, cycleInfo);
+        } catch (err: any) {
+            console.error(
+                `[ARCHIVE] Failed to append cycle info page for order ${row.order_id}: ${err.message} — archiving without it`,
+            );
+        }
+
         const tmpInputPath = path.join(
             os.tmpdir(),
             `archive-src-${crypto.randomBytes(8).toString("hex")}.pdf`,
         );
-        fs.writeFileSync(tmpInputPath, doc.buffer);
+        fs.writeFileSync(tmpInputPath, bufferToArchive);
 
         try {
             const outputFilename = `KM-SVM_${row.sales_order}_${archivePositionFor(documentType, row.position)}.pdf`;
