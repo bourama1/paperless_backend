@@ -19,6 +19,7 @@ jest.mock("../../services/pdfaService", () => ({
 
 import {
     getDocumentsOverview,
+    getDocumentById,
     exportPdfa,
 } from "../../controllers/filesController";
 import { getDb } from "../../config/database";
@@ -312,6 +313,83 @@ describe("Files Controller", () => {
             expect(byWorkstation.Motor).toMatchObject({ document_id: 2, document_name: "motor.pdf" });
         });
 
+        it("keeps Hardware's and Motor's cycle checks independent for the same position — checking Hardware's cycle 1 must not check Motor's cycle 1 too", async () => {
+            mockRequest = { query: {} };
+
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: "complete" },
+                { project_number: "P1", position: "10", workstation: "Motor", latest_status: "complete" },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "order_cycle_checks") {
+                    // Only Hardware's cycle 1 was ever checked — Motor's
+                    // own cycle 1 has no row at all.
+                    return chainable([
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            workstation: "Hardware",
+                            cycle_index: 1,
+                            status: "ok",
+                            employee_name: "Jan Novak",
+                            note: null,
+                            created_at: "2026-09-18T09:00:00Z",
+                        },
+                    ]);
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            const byWorkstation = Object.fromEntries(result.items.map((i: any) => [i.workstation, i]));
+            expect(byWorkstation.Hardware).toMatchObject({ checked: true, checked_cycles: 1 });
+            expect(byWorkstation.Motor).toMatchObject({ checked: false, checked_cycles: 0 });
+        });
+
+        it("still honors a check recorded before the workstation column existed (NULL), for whichever workstation asks", async () => {
+            mockRequest = { query: {} };
+
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: "complete" },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "order_cycle_checks") {
+                    return chainable([
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            workstation: null,
+                            cycle_index: 1,
+                            status: "ok",
+                            employee_name: "Jan Novak",
+                            note: null,
+                            created_at: "2026-01-01T09:00:00Z",
+                        },
+                    ]);
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items[0]).toMatchObject({ checked: true, checked_cycles: 1 });
+        });
+
         it("should return empty items when nothing matches", async () => {
             mockRequest = { query: {} };
             const db = jest.fn(() => chainable([]));
@@ -424,6 +502,7 @@ describe("Files Controller", () => {
                         {
                             project_number: "P1",
                             position: "10",
+                            workstation: "Hardware",
                             max_total_cycles: 3,
                         },
                     ]);
@@ -445,6 +524,7 @@ describe("Files Controller", () => {
                         {
                             project_number: "P1",
                             position: "10",
+                            workstation: "Hardware",
                             cycle_index: 1,
                             status: "ok",
                             employee_name: "Jan Novak",
@@ -454,6 +534,7 @@ describe("Files Controller", () => {
                         {
                             project_number: "P1",
                             position: "10",
+                            workstation: "Hardware",
                             cycle_index: 2,
                             status: "ok",
                             employee_name: "Jan Novak",
@@ -575,6 +656,94 @@ describe("Files Controller", () => {
                 checked_cycles: 0,
                 unchecked_cycles: [1],
             });
+        });
+    });
+
+    describe("getDocumentById", () => {
+        function chain(resolveValue: any) {
+            const c: any = {};
+            for (const m of ["where", "whereIn", "whereNot", "select", "max", "groupBy", "orderBy"]) {
+                c[m] = jest.fn().mockReturnValue(c);
+            }
+            c.first = jest.fn().mockResolvedValue(Array.isArray(resolveValue) ? (resolveValue[0] ?? null) : resolveValue);
+            c.then = (resolve: any) => resolve(resolveValue);
+            return c;
+        }
+
+        it("picks the completion matching this document's own type, not just whichever is most recent overall", async () => {
+            mockRequest = { params: { id: "1" } };
+
+            const doc = { id: 1, project_number: "P1", position: "10", document_type: 14 }; // 14 = PBOM_HARDWARE
+            // Motor is the more recent completion, but this document is
+            // Hardware's — it must pick up Hardware's status, not Motor's.
+            const completionRows = [
+                {
+                    order_id: "m1",
+                    workstation: "Motor",
+                    status: "complete",
+                    cycle_index: 1,
+                    total_cycles: 1,
+                    product_order: "PO-M",
+                    sales_order: "SO1",
+                    created_at: "2026-09-18T10:00:00Z",
+                },
+                {
+                    order_id: "h1",
+                    workstation: "Hardware",
+                    status: "complete_with_changes",
+                    cycle_index: 1,
+                    total_cycles: 1,
+                    product_order: "PO-H",
+                    sales_order: "SO1",
+                    created_at: "2026-09-18T09:00:00Z",
+                },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "documents") return chain(doc);
+                if (table === "order_completion_log") return chain(completionRows);
+                if (table === "revisions") return chain(null);
+                return chain([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentById(mockRequest as Request, mockResponse as Response);
+
+            expect(mockJson).toHaveBeenCalledWith(
+                expect.objectContaining({
+                    status: "complete_with_changes",
+                    completion: expect.objectContaining({ order_id: "h1", workstation: "Hardware" }),
+                }),
+            );
+        });
+
+        it("falls back to a null completion/status when no completion matches this document's type", async () => {
+            mockRequest = { params: { id: "2" } };
+            const doc = { id: 2, project_number: "P1", position: "10", document_type: 999 };
+
+            const db = jest.fn((table: string) => {
+                if (table === "documents") return chain(doc);
+                if (table === "order_completion_log") return chain([]);
+                if (table === "revisions") return chain(null);
+                return chain([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentById(mockRequest as Request, mockResponse as Response);
+
+            expect(mockJson).toHaveBeenCalledWith(
+                expect.objectContaining({ status: null, completion: null }),
+            );
+        });
+
+        it("returns 404 when the document doesn't exist", async () => {
+            mockRequest = { params: { id: "999" } };
+            const db = jest.fn(() => chain(null));
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentById(mockRequest as Request, mockResponse as Response);
+
+            expect(mockStatus).toHaveBeenCalledWith(404);
         });
     });
 

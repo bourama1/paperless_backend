@@ -573,4 +573,22 @@ const setupDatabase = async (targetDb: Knex) => {
             table.timestamp("updated_at").defaultTo(targetDb.fn.now());
         });
     }
+
+    // 21. workstation column on order_cycle_checks — the same
+    // project_number+position can be completed independently at more than
+    // one workplace (e.g. "Hardware" and "Motor" are separate production
+    // passes with their own order_id in order_completion_log, which
+    // already has a workstation column). Without one here too, a check
+    // recorded for one workplace's cycle 1 was indistinguishable from
+    // another workplace's cycle 1, so whichever was checked most recently
+    // silently applied to both. Added via alterTable so existing rows
+    // (recorded before this existed) keep a NULL workstation rather than
+    // losing their check status — getCheckStatusForPositions treats a NULL
+    // row as still matching any workplace, so already-checked orders don't
+    // appear to reset; only checks recorded from here on are truly scoped.
+    if (!(await targetDb.schema.hasColumn("order_cycle_checks", "workstation"))) {
+        await targetDb.schema.alterTable("order_cycle_checks", (table) => {
+            table.string("workstation");
+        });
+    }
 };

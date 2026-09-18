@@ -254,6 +254,11 @@ export function isValidCheckStatus(status: string): status is OrderCheckStatus {
 export interface OrderCheckInput {
     projectNumber: string;
     position: string;
+    // Which independent production pass this check belongs to (e.g.
+    // "Hardware" vs "Motor") — the same project/position can be completed
+    // separately at more than one workplace, so this is what keeps their
+    // checks from being conflated. See getCheckStatusForPositions.
+    workstation: string;
     cycleIndex: number;
     totalCycles: number;
     employeeName: string;
@@ -274,6 +279,7 @@ export const recordOrderCheck = async (input: OrderCheckInput): Promise<void> =>
     await db("order_cycle_checks").insert({
         project_number: input.projectNumber,
         position: input.position,
+        workstation: input.workstation,
         cycle_index: input.cycleIndex,
         total_cycles: input.totalCycles,
         employee_name: input.employeeName,

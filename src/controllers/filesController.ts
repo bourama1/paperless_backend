@@ -39,12 +39,25 @@ interface PositionCheckStatus {
 
 /**
  * Batch-resolves per-cycle QC status for a set of (project_number,
- * position) pairs (order_cycle_checks — see completionService.ts and
- * database.ts's comment on that table). Checking is per cycle (one box at
- * a time), not per position as a whole — a cycle counts as checked once
- * its MOST RECENT check row has status "ok"; an "issue" (even a later
- * re-check that flips back to issue) makes it unchecked again until
- * someone re-checks it "ok".
+ * position, workstation) triples (order_cycle_checks — see
+ * completionService.ts and database.ts's comment on that table). Checking
+ * is per cycle (one box at a time), not per position as a whole — a cycle
+ * counts as checked once its MOST RECENT check row has status "ok"; an
+ * "issue" (even a later re-check that flips back to issue) makes it
+ * unchecked again until someone re-checks it "ok".
+ *
+ * Scoped by workstation because the same project_number+position can be
+ * completed independently at more than one workplace (Hardware and Motor
+ * are separate production passes, each with their own order_id in
+ * order_completion_log) — without this, a check recorded for one
+ * workplace's cycle 1 was indistinguishable from another workplace's cycle
+ * 1. order_cycle_checks rows recorded before it had a workstation column
+ * are NULL there; those are treated as matching ANY requested workstation
+ * for that position (see fanOutToWorkstations below) so already-checked
+ * orders don't appear to reset — only checks recorded from here on are
+ * truly workstation-scoped. order_preparation_log/ptl_prep_queue have no
+ * workstation column at all (pre-existing, out of scope here) — their
+ * total_cycles fallback is shared across every workstation for a position.
  *
  * total_cycles for a position is read from whichever source has it, in
  * order of authority: real P2L cycle data (order_completion_log) first,
@@ -54,76 +67,106 @@ interface PositionCheckStatus {
  */
 async function getCheckStatusForPositions(
     db: any,
-    positions: { project_number: string; position: string }[],
+    positions: { project_number: string; position: string; workstation: string }[],
 ): Promise<Map<string, PositionCheckStatus>> {
     const result = new Map<string, PositionCheckStatus>();
     if (positions.length === 0) return result;
 
-    const key = (pn: string, pos: string) => `${pn}||${pos}`;
-    const pairs = positions.map((p) => [p.project_number, p.position]);
+    const key = (pn: string, pos: string, ws: string) => `${pn}||${pos}||${ws}`;
+    const posKey = (pn: string, pos: string) => `${pn}||${pos}`;
+
+    // Which requested workstations exist for each project_number+position —
+    // needed to fan a position-only row (order_preparation_log/
+    // ptl_prep_queue, or a legacy NULL-workstation check) out to every
+    // workstation asking about that position.
+    const workstationsByPosKey = new Map<string, Set<string>>();
+    for (const p of positions) {
+        const pk = posKey(p.project_number, p.position);
+        let set = workstationsByPosKey.get(pk);
+        if (!set) {
+            set = new Set();
+            workstationsByPosKey.set(pk, set);
+        }
+        set.add(p.workstation);
+    }
+    const posPairs = Array.from(workstationsByPosKey.keys()).map((k) => k.split("||"));
+    const completionTriples = positions.map((p) => [p.project_number, p.position, p.workstation]);
 
     const [completionRows, prepRows, planRows, checkRows] = await Promise.all([
         db("order_completion_log")
-            .select("project_number", "position")
+            .select("project_number", "position", "workstation")
             .max("total_cycles as max_total_cycles")
-            .whereIn(["project_number", "position"], pairs)
-            .groupBy("project_number", "position"),
+            .whereIn(["project_number", "position", "workstation"], completionTriples)
+            .groupBy("project_number", "position", "workstation"),
         db("order_preparation_log")
             .select("project_number", "position")
             .max("total_cycles as max_total_cycles")
-            .whereIn(["project_number", "position"], pairs)
+            .whereIn(["project_number", "position"], posPairs)
             .groupBy("project_number", "position"),
         db("ptl_prep_queue")
             .select("project_number", "position")
             .max("quantity as max_quantity")
-            .whereIn(["project_number", "position"], pairs)
+            .whereIn(["project_number", "position"], posPairs)
             .groupBy("project_number", "position"),
         // Every check row, newest first, for every cycle of every position
         // — grouped/reduced to "latest row per cycle" below in JS, since
         // that's simpler and more portable across DBs than a window
         // function here.
         db("order_cycle_checks")
-            .whereIn(["project_number", "position"], pairs)
+            .whereIn(["project_number", "position"], posPairs)
             .orderBy("created_at", "desc"),
     ]);
 
     const totalByKey = new Map<string, number>();
     for (const r of completionRows as any[]) {
         totalByKey.set(
-            key(r.project_number, r.position),
+            key(r.project_number, r.position, r.workstation),
             Number(r.max_total_cycles) || 1,
         );
     }
     for (const r of prepRows as any[]) {
-        const k = key(r.project_number, r.position);
-        if (!totalByKey.has(k))
-            totalByKey.set(k, Number(r.max_total_cycles) || 1);
+        const pk = posKey(r.project_number, r.position);
+        for (const ws of workstationsByPosKey.get(pk) ?? []) {
+            const k = key(r.project_number, r.position, ws);
+            if (!totalByKey.has(k)) totalByKey.set(k, Number(r.max_total_cycles) || 1);
+        }
     }
     for (const r of planRows as any[]) {
-        const k = key(r.project_number, r.position);
-        if (!totalByKey.has(k)) totalByKey.set(k, Number(r.max_quantity) || 1);
+        const pk = posKey(r.project_number, r.position);
+        for (const ws of workstationsByPosKey.get(pk) ?? []) {
+            const k = key(r.project_number, r.position, ws);
+            if (!totalByKey.has(k)) totalByKey.set(k, Number(r.max_quantity) || 1);
+        }
     }
 
-    // Latest check row per (position, cycle_index) — rows are already
-    // ordered newest-first, so the first one seen per (key, cycle_index)
-    // wins and later (older) ones for that same cycle are ignored.
-    const latestByPositionCycle = new Map<string, Map<number, any>>();
+    // Latest check row per (key, cycle_index) — rows are already ordered
+    // newest-first, so the first one seen per (key, cycle_index) wins and
+    // later (older) ones for that same cycle are ignored. A row with a real
+    // workstation only applies to that one; a legacy NULL-workstation row
+    // fans out to every workstation requested for that position.
+    const latestByKeyCycle = new Map<string, Map<number, any>>();
     for (const row of checkRows as any[]) {
-        const k = key(row.project_number, row.position);
-        let byCycle = latestByPositionCycle.get(k);
-        if (!byCycle) {
-            byCycle = new Map<number, any>();
-            latestByPositionCycle.set(k, byCycle);
-        }
-        if (!byCycle.has(row.cycle_index)) {
-            byCycle.set(row.cycle_index, row);
+        const pk = posKey(row.project_number, row.position);
+        const targetWorkstations = row.workstation
+            ? [row.workstation]
+            : Array.from(workstationsByPosKey.get(pk) ?? []);
+        for (const ws of targetWorkstations) {
+            const k = key(row.project_number, row.position, ws);
+            let byCycle = latestByKeyCycle.get(k);
+            if (!byCycle) {
+                byCycle = new Map<number, any>();
+                latestByKeyCycle.set(k, byCycle);
+            }
+            if (!byCycle.has(row.cycle_index)) {
+                byCycle.set(row.cycle_index, row);
+            }
         }
     }
 
     for (const p of positions) {
-        const k = key(p.project_number, p.position);
+        const k = key(p.project_number, p.position, p.workstation);
         const totalCycles = totalByKey.get(k) ?? 1;
-        const byCycle = latestByPositionCycle.get(k);
+        const byCycle = latestByKeyCycle.get(k);
 
         const cycles: CycleCheckDetail[] = [];
         for (let cycleIndex = 1; cycleIndex <= totalCycles; cycleIndex++) {
@@ -174,24 +217,35 @@ export const getDocumentById = async (req: Request, res: Response) => {
             return res.status(404).json({ error: "Document not found" });
         }
 
-        const latestCompletion = await db("order_completion_log")
+        // A position can be completed independently at more than one
+        // workplace (Hardware and Motor are separate production passes,
+        // see getDocumentsOverview) — pick whichever completion's
+        // workstation actually corresponds to THIS document's own type via
+        // resolvePbomTypeForWorkplace, not just whichever happens to be
+        // most recent overall, or a Hardware document could show Motor's
+        // status (or vice versa).
+        const completionRows = await db("order_completion_log")
             .where({
                 project_number: doc.project_number,
                 position: doc.position,
             })
-            .orderBy("created_at", "desc")
-            .first();
+            .orderBy("created_at", "desc");
+        const latestCompletion =
+            (completionRows as any[]).find(
+                (r) => resolvePbomTypeForWorkplace(r.workstation) === doc.document_type,
+            ) ?? null;
 
         const hasEditedRevision = await db("revisions")
             .where({ document_id: doc.id })
             .whereNot("filename", "like", "docmgr://%")
             .first();
 
+        const workstation = latestCompletion?.workstation ?? "";
         const checkStatusMap = await getCheckStatusForPositions(db, [
-            { project_number: doc.project_number, position: doc.position },
+            { project_number: doc.project_number, position: doc.position, workstation },
         ]);
         const checkStatus = checkStatusMap.get(
-            `${doc.project_number}||${doc.position}`,
+            `${doc.project_number}||${doc.position}||${workstation}`,
         ) ?? {
             totalCycles: 1,
             checkedCycles: 0,
@@ -371,9 +425,20 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                       .orderBy("version", "desc")
                 : [];
 
+        // Distinct (project_number, position, workstation) triples — a
+        // check status is scoped per workstation now (see
+        // getCheckStatusForPositions), since Hardware and Motor completions
+        // for the same position are independent and must be checked
+        // independently.
+        const distinctPositionWorkstations = Array.from(
+            new Set(rows.map((r: any) => `${r.project_number}||${r.position}||${r.workstation}`)),
+        ).map((key) => {
+            const [project_number, position, workstation] = key.split("||");
+            return { project_number: project_number!, position: position!, workstation: workstation! };
+        });
         const checkStatusByPosition = await getCheckStatusForPositions(
             db,
-            distinctPositions,
+            distinctPositionWorkstations,
         );
 
         const revisionsByDoc = new Map<number, any[]>();
@@ -399,7 +464,7 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
             const revisions = doc ? revisionsByDoc.get(doc.id) || [] : [];
             const revisioned = revisions.some((r) => r.is_edited);
             const check = checkStatusByPosition.get(
-                `${row.project_number}||${row.position}`,
+                `${row.project_number}||${row.position}||${row.workstation}`,
             ) ?? {
                 totalCycles: 1,
                 checkedCycles: 0,

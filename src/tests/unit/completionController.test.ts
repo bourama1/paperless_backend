@@ -296,7 +296,7 @@ describe("Completion Controller", () => {
     });
 
     describe("createOrderCheck", () => {
-        it("should return 400 if required fields (including cycleIndex) are missing", async () => {
+        it("should return 400 if required fields (including workstation/cycleIndex) are missing", async () => {
             mockRequest = {
                 body: { projectNumber: "P1", position: "10", employeeName: "Jan Novak", status: "ok" },
             };
@@ -305,7 +305,7 @@ describe("Completion Controller", () => {
 
             expect(mockStatus).toHaveBeenCalledWith(400);
             expect(mockJson).toHaveBeenCalledWith({
-                error: "projectNumber, position, cycleIndex, employeeName, and status are required",
+                error: "projectNumber, position, workstation, cycleIndex, employeeName, and status are required",
             });
             expect(recordOrderCheck).not.toHaveBeenCalled();
         });
@@ -316,6 +316,7 @@ describe("Completion Controller", () => {
                 body: {
                     projectNumber: "P1",
                     position: "10",
+                    workstation: "Hardware",
                     cycleIndex: 1,
                     employeeName: "Jan Novak",
                     status: "maybe",
@@ -336,6 +337,7 @@ describe("Completion Controller", () => {
                 body: {
                     projectNumber: "P1",
                     position: "10",
+                    workstation: "Hardware",
                     cycleIndex: 2,
                     totalCycles: 3,
                     employeeName: "Petr Svoboda",
@@ -349,6 +351,7 @@ describe("Completion Controller", () => {
             expect(recordOrderCheck).toHaveBeenCalledWith({
                 projectNumber: "P1",
                 position: "10",
+                workstation: "Hardware",
                 cycleIndex: 2,
                 totalCycles: 3,
                 employeeName: "Petr Svoboda",
@@ -364,6 +367,7 @@ describe("Completion Controller", () => {
                 body: {
                     projectNumber: "P1",
                     position: "10",
+                    workstation: "Hardware",
                     cycleIndex: 1,
                     employeeName: "Petr Svoboda",
                     status: "issue",
@@ -377,6 +381,7 @@ describe("Completion Controller", () => {
             expect(recordOrderCheck).toHaveBeenCalledWith({
                 projectNumber: "P1",
                 position: "10",
+                workstation: "Hardware",
                 cycleIndex: 1,
                 totalCycles: 1,
                 employeeName: "Petr Svoboda",
@@ -391,6 +396,7 @@ describe("Completion Controller", () => {
                 body: {
                     projectNumber: "P1",
                     position: "10",
+                    workstation: "Hardware",
                     cycleIndex: 1,
                     employeeName: "Jan Novak",
                     status: "ok",

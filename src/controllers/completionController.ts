@@ -290,12 +290,12 @@ export const createPrepLabel = async (req: Request, res: Response) => {
 };
 
 export const createOrderCheck = async (req: Request, res: Response) => {
-    const { projectNumber, position, cycleIndex, totalCycles, employeeName, status, note } =
+    const { projectNumber, position, workstation, cycleIndex, totalCycles, employeeName, status, note } =
         req.body;
 
-    if (!projectNumber || !position || !employeeName || !status || !cycleIndex) {
+    if (!projectNumber || !position || !workstation || !employeeName || !status || !cycleIndex) {
         return res.status(400).json({
-            error: "projectNumber, position, cycleIndex, employeeName, and status are required",
+            error: "projectNumber, position, workstation, cycleIndex, employeeName, and status are required",
         });
     }
     if (!isValidCheckStatus(status)) {
@@ -308,6 +308,7 @@ export const createOrderCheck = async (req: Request, res: Response) => {
         await recordOrderCheck({
             projectNumber,
             position,
+            workstation,
             cycleIndex,
             totalCycles: typeof totalCycles === "number" && totalCycles > 0 ? totalCycles : 1,
             employeeName,
