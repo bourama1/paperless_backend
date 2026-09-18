@@ -77,16 +77,13 @@ describe("Files Controller", () => {
         it("should return non-archived documents with latest status and revisioned flag", async () => {
             mockRequest = { query: {} };
 
-            const mockDocRows = [
+            // ocl-driven rows only — document_id/name/type no longer come
+            // from this query (see the separate "documents" fetch below).
+            const mockOclRows = [
                 {
-                    document_id: 1,
-                    document_name: "doc1.pdf",
                     project_number: "P1",
                     position: "10",
                     workstation: "Hardware",
-                    document_type: 14,
-                    created_at: "2026-07-17T10:00:00Z",
-                    updated_at: "2026-07-17T10:00:00Z",
                     latest_status: "complete",
                     // The kiosk completion time — distinct from the
                     // document's own created_at, which only reflects
@@ -94,19 +91,38 @@ describe("Files Controller", () => {
                     completed_at: "2026-07-17T09:55:00Z",
                 },
                 {
-                    document_id: 2,
-                    document_name: "doc2.pdf",
                     project_number: "P2",
                     position: "20",
                     workstation: "Hardware",
-                    document_type: 4,
-                    created_at: "2026-07-17T12:00:00Z",
-                    updated_at: "2026-07-17T12:00:00Z",
                     // Every row always has a status now — the query joins
                     // order_completion_log with an inner join, so it's
                     // structurally guaranteed, not filtered at runtime.
                     latest_status: "missing_product",
                     completed_at: "2026-07-17T11:58:00Z",
+                },
+            ];
+            // The "documents" table's own rows — matched to an ocl row by
+            // project_number+position+document_type, where document_type
+            // is resolvePbomTypeForWorkplace(ocl.workstation) (14 = PBOM_HARDWARE
+            // for "Hardware", per config/documentTypes.ts's real mapping).
+            const mockDocumentRows = [
+                {
+                    id: 1,
+                    name: "doc1.pdf",
+                    project_number: "P1",
+                    position: "10",
+                    document_type: 14,
+                    created_at: "2026-07-17T10:00:00Z",
+                    updated_at: "2026-07-17T10:00:00Z",
+                },
+                {
+                    id: 2,
+                    name: "doc2.pdf",
+                    project_number: "P2",
+                    position: "20",
+                    document_type: 14,
+                    created_at: "2026-07-17T12:00:00Z",
+                    updated_at: "2026-07-17T12:00:00Z",
                 },
             ];
             // Pre-sorted version desc, matching the real ORDER BY version desc clause.
@@ -130,7 +146,8 @@ describe("Files Controller", () => {
             ];
 
             const db = jest.fn((table: any) => {
-                if (table === "subquery") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "documents") return chainable(mockDocumentRows);
                 if (table === "revisions") return chainable(mockRevisionRows);
                 return chainable([]);
             });
@@ -188,7 +205,7 @@ describe("Files Controller", () => {
                         project_number: "P2",
                         position: "20",
                         workstation: "Hardware",
-                        document_type: 4,
+                        document_type: 14,
                         created_at: "2026-07-17T12:00:00Z",
                         updated_at: "2026-07-17T12:00:00Z",
                         completed_at: "2026-07-17T11:58:00Z",
@@ -207,26 +224,19 @@ describe("Files Controller", () => {
         it("includes an order that reached a kiosk finishing state even when its BOM was never opened/imported in-app (no documents row)", async () => {
             mockRequest = { query: {} };
 
-            // No document_id/document_name/document_type/created_at/updated_at
-            // at all — order_completion_log is the only source for this row
-            // (the documents left join matched nothing).
-            const mockRows = [
+            // No matching row in "documents" at all for this project/position.
+            const mockOclRows = [
                 {
-                    document_id: null,
-                    document_name: null,
                     project_number: "P3",
                     position: "30",
                     workstation: "Motor",
-                    document_type: null,
-                    created_at: null,
-                    updated_at: null,
                     latest_status: "complete",
                     completed_at: "2026-09-16T11:46:28.220Z",
                 },
             ];
 
             const db = jest.fn((table: any) => {
-                if (table === "subquery") return chainable(mockRows);
+                if (table === "subquery") return chainable(mockOclRows);
                 return chainable([]);
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -249,6 +259,53 @@ describe("Files Controller", () => {
                 revisioned: false,
                 revisions: [],
             });
+        });
+
+        it("keeps a Hardware completion and a Motor completion for the same project/position as two separate items", async () => {
+            mockRequest = { query: {} };
+
+            const mockOclRows = [
+                {
+                    project_number: "P1",
+                    position: "10",
+                    workstation: "Hardware",
+                    latest_status: "complete",
+                    completed_at: "2026-09-17T09:00:00Z",
+                },
+                {
+                    project_number: "P1",
+                    position: "10",
+                    workstation: "Motor",
+                    latest_status: "complete",
+                    completed_at: "2026-09-17T10:00:00Z",
+                },
+            ];
+            // 14 = PBOM_HARDWARE, 15 = PBOM_MOTOR — each completion must
+            // pick up only its OWN document, never the other's.
+            const mockDocumentRows = [
+                { id: 1, name: "hardware.pdf", project_number: "P1", position: "10", document_type: 14 },
+                { id: 2, name: "motor.pdf", project_number: "P1", position: "10", document_type: 15 },
+            ];
+
+            const db = jest.fn((table: any) => {
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "documents") return chainable(mockDocumentRows);
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items).toHaveLength(2);
+            const byWorkstation = Object.fromEntries(
+                result.items.map((i: any) => [i.workstation, i]),
+            );
+            expect(byWorkstation.Hardware).toMatchObject({ document_id: 1, document_name: "hardware.pdf" });
+            expect(byWorkstation.Motor).toMatchObject({ document_id: 2, document_name: "motor.pdf" });
         });
 
         it("should return empty items when nothing matches", async () => {
@@ -300,27 +357,13 @@ describe("Files Controller", () => {
         it("should filter to only revisioned documents when revisioned=true", async () => {
             mockRequest = { query: { revisioned: "true" } };
 
-            const mockDocRows = [
-                {
-                    document_id: 1,
-                    document_name: "doc1.pdf",
-                    project_number: "P1",
-                    position: "10",
-                    document_type: 14,
-                    created_at: "t",
-                    updated_at: "t",
-                    latest_status: null,
-                },
-                {
-                    document_id: 2,
-                    document_name: "doc2.pdf",
-                    project_number: "P2",
-                    position: "20",
-                    document_type: 4,
-                    created_at: "t",
-                    updated_at: "t",
-                    latest_status: null,
-                },
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: null },
+                { project_number: "P2", position: "20", workstation: "Hardware", latest_status: null },
+            ];
+            const mockDocumentRows = [
+                { id: 1, name: "doc1.pdf", project_number: "P1", position: "10", document_type: 14 },
+                { id: 2, name: "doc2.pdf", project_number: "P2", position: "20", document_type: 14 },
             ];
             // Only document 1 has a real (non-docmgr://) edited revision.
             const mockRevisionRows = [
@@ -343,7 +386,8 @@ describe("Files Controller", () => {
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "subquery") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "documents") return chainable(mockDocumentRows);
                 if (table === "revisions") return chainable(mockRevisionRows);
                 return chainable([]);
             });
@@ -362,21 +406,12 @@ describe("Files Controller", () => {
         it("should compute checked/checked_cycles/total_cycles from order_cycle_checks, preferring order_completion_log for total_cycles", async () => {
             mockRequest = { query: {} };
 
-            const mockDocRows = [
-                {
-                    document_id: 1,
-                    document_name: "doc1.pdf",
-                    project_number: "P1",
-                    position: "10",
-                    document_type: 14,
-                    created_at: "t",
-                    updated_at: "t",
-                    latest_status: "complete",
-                },
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: "complete" },
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "subquery") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockOclRows);
                 if (table === "revisions") return chainable([]);
                 if (table === "order_completion_log") {
                     // Real P2L cycle data says this position has 3 cycles —
@@ -444,31 +479,18 @@ describe("Files Controller", () => {
         it("should filter to only unchecked documents when unchecked=true", async () => {
             mockRequest = { query: { unchecked: "true" } };
 
-            const mockDocRows = [
-                {
-                    document_id: 1,
-                    document_name: "doc1.pdf",
-                    project_number: "P1",
-                    position: "10",
-                    document_type: 14,
-                    created_at: "t",
-                    updated_at: "t",
-                    latest_status: null,
-                },
-                {
-                    document_id: 2,
-                    document_name: "doc2.pdf",
-                    project_number: "P2",
-                    position: "20",
-                    document_type: 4,
-                    created_at: "t",
-                    updated_at: "t",
-                    latest_status: null,
-                },
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: null },
+                { project_number: "P2", position: "20", workstation: "Hardware", latest_status: null },
+            ];
+            const mockDocumentRows = [
+                { id: 1, name: "doc1.pdf", project_number: "P1", position: "10", document_type: 14 },
+                { id: 2, name: "doc2.pdf", project_number: "P2", position: "20", document_type: 14 },
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "subquery") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "documents") return chainable(mockDocumentRows);
                 if (table === "revisions") return chainable([]);
                 if (table === "order_cycle_checks") {
                     // P1/10 fully checked (1/1 default cycle); P2/20 not checked at all.
@@ -502,21 +524,12 @@ describe("Files Controller", () => {
         it("does not count a cycle as checked if its latest row is 'issue', even if an older row was 'ok'", async () => {
             mockRequest = { query: {} };
 
-            const mockDocRows = [
-                {
-                    document_id: 1,
-                    document_name: "doc1.pdf",
-                    project_number: "P1",
-                    position: "10",
-                    document_type: 14,
-                    created_at: "t",
-                    updated_at: "t",
-                    latest_status: null,
-                },
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: null },
             ];
 
             const db = jest.fn((table: string) => {
-                if (table === "subquery") return chainable(mockDocRows);
+                if (table === "subquery") return chainable(mockOclRows);
                 if (table === "revisions") return chainable([]);
                 if (table === "order_cycle_checks") {
                     // Rows are returned newest-first (matches the real

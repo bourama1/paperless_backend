@@ -3,6 +3,7 @@ import { getDb } from "../config/database";
 import path from "path";
 import fs from "fs";
 import { convertToPdfA, PdfaConversionError } from "../services/pdfaService";
+import { resolvePbomTypeForWorkplace } from "../config/documentTypes";
 
 /**
  * Batch-resolves check status for a set of (project_number, position)
@@ -239,13 +240,17 @@ export const getDocumentById = async (req: Request, res: Response) => {
 };
 
 /**
- * Returns every order/position that has reached one of the completion
- * kiosk's finishing states and hasn't been archived yet (see
+ * Returns every order/position/workstation that has reached one of the
+ * completion kiosk's finishing states and hasn't been archived yet (see
  * archivalService.ts) — driven by order_completion_log, NOT by the
  * "documents" table, so an order shows up here purely because the kiosk
  * finished it, whether or not its BOM was ever opened/imported through the
  * app's own preparation flow (document_id/document_name/document_type are
- * null when it wasn't). Each item is annotated with:
+ * null when it wasn't). One project/position can legitimately appear as two
+ * separate items here — e.g. completed at both Hardware and Motor — since
+ * those are independent completions, not cycles of one workflow; each is
+ * matched to its OWN document via resolvePbomTypeForWorkplace(workstation),
+ * never to each other's. Each item is annotated with:
  *   - completed_at: when the kiosk operator actually finished this order —
  *     use this for display, not created_at/updated_at (those only reflect
  *     whenever/if someone happened to open the BOM in-app).
@@ -276,31 +281,32 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
         const revisionedOnly = req.query.revisioned === "true";
         const uncheckedOnly = req.query.unchecked === "true";
 
-        // Most recent order_completion_log row per projectNumber/position —
-        // a project/position can have many rows (one per FINISHED cycle at
-        // the completion kiosk), so resolve to just the latest one.
+        // Most recent order_completion_log row per projectNumber/position/
+        // workstation — grouping by workstation too, not just
+        // project_number+position, matters because the SAME position can
+        // be completed separately at both Hardware and Motor (they're
+        // independent completions, not cycles of one one workflow); without
+        // it, one would silently overwrite/hide the other below.
         const latestCompletionMax = db("order_completion_log")
-            .select("project_number", "position")
+            .select("project_number", "position", "workstation")
             .max("created_at as max_created_at")
-            .groupBy("project_number", "position")
+            .groupBy("project_number", "position", "workstation")
             .as("lc_max");
 
         // Driven by order_completion_log, not by documents — a project/
-        // position belongs here purely because the completion kiosk
-        // finished it, whether or not anyone ever opened/imported its BOM
-        // through the app's own preparation flow (see the "documents" left
-        // join below, which is allowed to match nothing).
+        // position/workstation belongs here purely because the completion
+        // kiosk finished it, whether or not anyone ever opened/imported its
+        // BOM through the app's own preparation flow. Documents aren't
+        // joined here in SQL (see the manual match below instead) — a
+        // naive join on just project_number+position would fan out into a
+        // cross product once a position has completions at more than one
+        // workstation AND more than one document type already imported.
         let query = db(latestCompletionMax)
             .join("order_completion_log as ocl", function (this: any) {
                 this.on("ocl.project_number", "lc_max.project_number")
                     .andOn("ocl.position", "lc_max.position")
+                    .andOn("ocl.workstation", "lc_max.workstation")
                     .andOn("ocl.created_at", "lc_max.max_created_at");
-            })
-            .leftJoin("documents as d", function (this: any) {
-                this.on("d.project_number", "ocl.project_number").andOn(
-                    "d.position",
-                    "ocl.position",
-                );
             })
             // Not archived yet. A project/position can have more than one
             // order_archive_log row (e.g. two Motor cycles sharing the same
@@ -314,19 +320,14 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                     .whereNotNull("oal.archived_at");
             })
             .select(
-                "d.id as document_id",
-                "d.name as document_name",
                 "ocl.project_number",
                 "ocl.position",
                 "ocl.workstation",
-                "d.document_type",
-                "d.created_at",
-                "d.updated_at",
                 "ocl.status as latest_status",
                 // The actual thing the user cares about here — when the
-                // kiosk operator finished this order — as opposed to
-                // d.created_at/updated_at, which only reflect whenever
-                // someone happened to open/import the BOM in-app (if ever).
+                // kiosk operator finished this order — as opposed to a
+                // document's own created_at/updated_at, which only reflect
+                // whenever someone happened to open/import the BOM in-app.
                 "ocl.created_at as completed_at",
             );
 
@@ -336,11 +337,32 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
 
         const rows = await query.orderBy("ocl.created_at", "desc");
 
-        // document_id can now be null (order finished but its BOM was never
-        // opened/imported in-app), so exclude those before querying revisions.
-        const docIds = rows
-            .map((r: any) => r.document_id)
-            .filter((id: any) => id != null);
+        const distinctPositions = Array.from(
+            new Set(rows.map((r: any) => `${r.project_number}||${r.position}`)),
+        ).map((key) => {
+            const [project_number, position] = key.split("||");
+            return { project_number: project_number!, position: position! };
+        });
+
+        // Fetched separately (not joined in SQL) and matched up per-row in
+        // JS below via resolvePbomTypeForWorkplace(row.workstation) — the
+        // same mapping importDocument uses to decide which document_type a
+        // given workplace's BOM is, so a Hardware completion always picks
+        // up the Hardware document and a Motor completion the Motor one,
+        // never each other's.
+        const documentRows =
+            distinctPositions.length > 0
+                ? await db("documents").whereIn(
+                      ["project_number", "position"],
+                      distinctPositions.map((p) => [p.project_number, p.position]),
+                  )
+                : [];
+        const documentByKey = new Map<string, any>();
+        for (const d of documentRows) {
+            documentByKey.set(`${d.project_number}||${d.position}||${d.document_type}`, d);
+        }
+
+        const docIds = documentRows.map((d: any) => d.id);
         const revisionRows =
             docIds.length > 0
                 ? await db("revisions")
@@ -348,12 +370,6 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                       .orderBy("version", "desc")
                 : [];
 
-        const distinctPositions = Array.from(
-            new Set(rows.map((r: any) => `${r.project_number}||${r.position}`)),
-        ).map((key) => {
-            const [project_number, position] = key.split("||");
-            return { project_number: project_number!, position: position! };
-        });
         const checkStatusByPosition = await getCheckStatusForPositions(
             db,
             distinctPositions,
@@ -375,8 +391,11 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
         }
 
         let items = rows.map((row: any) => {
-            const revisions =
-                row.document_id != null ? revisionsByDoc.get(row.document_id) || [] : [];
+            const expectedType = resolvePbomTypeForWorkplace(row.workstation);
+            const doc = documentByKey.get(
+                `${row.project_number}||${row.position}||${expectedType}`,
+            );
+            const revisions = doc ? revisionsByDoc.get(doc.id) || [] : [];
             const revisioned = revisions.some((r) => r.is_edited);
             const check = checkStatusByPosition.get(
                 `${row.project_number}||${row.position}`,
@@ -387,14 +406,14 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                 uncheckedCycles: [1],
             };
             return {
-                document_id: row.document_id ?? null,
-                document_name: row.document_name ?? null,
+                document_id: doc?.id ?? null,
+                document_name: doc?.name ?? null,
                 project_number: row.project_number,
                 position: row.position,
                 workstation: row.workstation ?? null,
-                document_type: row.document_type ?? null,
-                created_at: row.created_at ?? row.completed_at,
-                updated_at: row.updated_at ?? row.completed_at,
+                document_type: doc?.document_type ?? null,
+                created_at: doc?.created_at ?? row.completed_at,
+                updated_at: doc?.updated_at ?? row.completed_at,
                 completed_at: row.completed_at,
                 status: row.latest_status || null,
                 revisioned,
