@@ -186,15 +186,22 @@ export const recordOrderPreparation = async (
     await db("order_preparation_log").insert(rows);
 };
 
+// Only Hardware and Motor go through the completion kiosk workflow — every
+// other work-type (ManDoor, 2KV, PredHridel, ...) never gets a completion
+// tag, so the durable backlog excludes them regardless of which workplace
+// filter is requested. Mirrors FORCED_FINISH_WORKPLACES in kiosk.tsx.
+const COMPLETION_KIOSK_WORKPLACES = ["Hardware", "Motor"];
+
 /**
- * Orders that reached FINISHED at the given workplace (or any workplace)
- * but haven't been completion-tagged yet — the kiosk's durable backlog.
- * Previously the kiosk only ever learned about a FINISHED order via a live
- * "workstation-order-update" socket event, so an order finishing while no
- * tablet had kiosk mode open was missed forever. workstation_log already
- * records every FINISHED event (see workstationService.handleOrderUpdate);
- * this just reads back whichever of those don't yet have a matching
- * order_completion_log row for that exact order_id + cycle_index.
+ * Hardware/Motor orders that reached FINISHED at the given workplace (or
+ * either, if none given) but haven't been completion-tagged yet — the
+ * kiosk's durable backlog. Previously the kiosk only ever learned about a
+ * FINISHED order via a live "workstation-order-update" socket event, so an
+ * order finishing while no tablet had kiosk mode open was missed forever.
+ * workstation_log already records every FINISHED event (see
+ * workstationService.handleOrderUpdate); this just reads back whichever of
+ * those don't yet have a matching order_completion_log row for that exact
+ * order_id + cycle_index.
  *
  * cycle_index is compared via COALESCE(...,1) on both sides: workstation_log
  * defaults it to 1, but order_completion_log's column has no default and
@@ -211,6 +218,7 @@ export const getCompletionQueue = async (
     let query = db("workstation_log as wl")
         .where("wl.action", "FINISHED")
         .andWhere("wl.created_at", ">=", cutoff)
+        .whereIn("wl.workstation_name", COMPLETION_KIOSK_WORKPLACES)
         .whereNotExists(function (this: any) {
             this.select(1)
                 .from("order_completion_log as ocl")

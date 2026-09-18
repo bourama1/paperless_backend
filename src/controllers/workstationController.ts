@@ -214,17 +214,19 @@ export const getWorkstations = async (req: Request, res: Response) => {
 };
 
 /**
- * Lists the distinct work-TYPE strings actually seen in order-update
- * events (e.g. "Hardware", "Motor") — as opposed to physical station
- * names from the polling feed (e.g. "WS_5"). The completion kiosk needs
- * this list, since FINISHED events only ever carry order.workplace, never
- * a physical station name.
+ * Lists the work-TYPE strings the completion kiosk can be pointed at — as
+ * opposed to physical station names from the polling feed (e.g. "WS_5").
+ * Restricted to Hardware/Motor: those are the only work-types that go
+ * through the completion workflow (see completionService's
+ * COMPLETION_KIOSK_WORKPLACES) — every other type would just be an option
+ * that always shows an empty queue.
  */
 export const listWorkplaces = async (req: Request, res: Response) => {
     try {
         const db = await getDb();
         const rows = await db("workstation_log")
             .distinct("workstation_name")
+            .whereIn("workstation_name", ["Hardware", "Motor"])
             .orderBy("workstation_name");
         res.json(rows.map((r: any) => r.workstation_name));
     } catch (error) {

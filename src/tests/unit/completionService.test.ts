@@ -147,7 +147,7 @@ describe("getCompletionQueue", () => {
 
     function chainableRows(rows: any[]) {
         const chain: any = {};
-        for (const m of ["where", "andWhere", "whereNotExists", "select"]) {
+        for (const m of ["where", "andWhere", "whereIn", "whereNotExists", "select"]) {
             chain[m] = jest.fn().mockReturnValue(chain);
         }
         chain.orderBy = jest.fn().mockResolvedValue(rows);
@@ -212,6 +212,16 @@ describe("getCompletionQueue", () => {
         await getCompletionQueue();
 
         expect(chain.andWhere).not.toHaveBeenCalledWith("wl.workstation_name", expect.anything());
+    });
+
+    it("always restricts to Hardware/Motor, even when a different workplace filter is passed", async () => {
+        const chain = chainableRows([]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await getCompletionQueue("ManDoor");
+
+        expect(chain.whereIn).toHaveBeenCalledWith("wl.workstation_name", ["Hardware", "Motor"]);
     });
 
     it("excludes anything already completion-tagged via whereNotExists", async () => {

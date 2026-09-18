@@ -32,6 +32,7 @@ import {
     importPbom,
     searchPbomHandler,
     resolveScanHandler,
+    listWorkplaces,
     getWorkstationLog,
     renderDocument,
     saveEdited,
@@ -405,6 +406,22 @@ describe("Workstation Controller", () => {
             expect(mockJson).toHaveBeenCalledWith({
                 error: "Internal server error",
             });
+        });
+    });
+
+    describe("listWorkplaces", () => {
+        it("restricts the distinct workplace list to Hardware/Motor", async () => {
+            const chain: any = { then: (resolve: any) => resolve([{ workstation_name: "Hardware" }]) };
+            chain.distinct = jest.fn(() => chain);
+            chain.whereIn = jest.fn(() => chain);
+            chain.orderBy = jest.fn(() => chain);
+            const db = jest.fn(() => chain);
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await listWorkplaces(mockRequest as Request, mockResponse as Response);
+
+            expect(chain.whereIn).toHaveBeenCalledWith("workstation_name", ["Hardware", "Motor"]);
+            expect(mockJson).toHaveBeenCalledWith(["Hardware"]);
         });
     });
 
