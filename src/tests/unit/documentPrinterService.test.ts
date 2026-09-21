@@ -336,3 +336,29 @@ describe("pbmRawToZplLabel", () => {
         expect(zpl).toContain("^GFA,6,6,2,FF000FF0AA55");
     });
 });
+
+// PNG IDAT data is per-scanline filtered; embedding it in a PDF without a
+// PNG predictor makes readers decode it as noise (QR printed as a black
+// square with white specks).
+describe("PNG-in-PDF embedding", () => {
+    const png = (colorType: number): PngInfo => ({
+        width: 245,
+        height: 245,
+        bitDepth: 8,
+        colorType,
+        idat: Buffer.from([0x78, 0x9c]),
+        palette: undefined,
+    });
+
+    it("declares the PNG predictor with matching colors/columns for RGB", () => {
+        const pdf = buildPdfFromPngFitted(png(2), 283.46, 368.5).toString("latin1");
+        expect(pdf).toContain(
+            "/DecodeParms << /Predictor 15 /Colors 3 /BitsPerComponent 8 /Columns 245 >>",
+        );
+    });
+
+    it("uses one color component for grayscale", () => {
+        const pdf = buildPdfFromPngFitted(png(0), 283.46, 368.5).toString("latin1");
+        expect(pdf).toContain("/Predictor 15 /Colors 1 ");
+    });
+});

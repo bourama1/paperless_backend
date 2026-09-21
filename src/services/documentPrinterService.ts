@@ -538,12 +538,19 @@ function assemblePngPdf(
     pageHeightPt: number,
     contentStream: string,
 ): Buffer {
+    // PNG prefixes every scanline with a filter-type byte; the PDF predictor
+    // (15 = PNG, per-row) is what strips/undoes it. Without DecodeParms the
+    // decoder treats those bytes as pixel data, every row is shifted by one
+    // byte, and the image comes out as speckled noise (a QR code printed as
+    // a black square with a few white dots).
+    const colors = png.colorType === 2 ? 3 : 1; // RGB vs gray / indexed
     const imageDictParts = [
         "<< /Type /XObject /Subtype /Image",
         `/Width ${png.width} /Height ${png.height}`,
         `/BitsPerComponent ${png.bitDepth}`,
         `/ColorSpace ${pngColorSpace(png)}`,
         "/Filter /FlateDecode",
+        `/DecodeParms << /Predictor 15 /Colors ${colors} /BitsPerComponent ${png.bitDepth} /Columns ${png.width} >>`,
         `/Length ${png.idat.length}`,
         ">>",
     ].join(" ");
