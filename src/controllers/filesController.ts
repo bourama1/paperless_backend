@@ -241,6 +241,18 @@ export const getDocumentById = async (req: Request, res: Response) => {
             .first();
 
         const workstation = latestCompletion?.workstation ?? "";
+
+        // Who completed each cycle at THIS document's workstation (newest
+        // row per cycle_index wins — rows are already newest-first), so a
+        // checker can go ask the right person about it.
+        const completedByCycle = new Map<number, { employee_name: string; created_at: string }>();
+        for (const r of completionRows as any[]) {
+            if (r.workstation !== workstation) continue;
+            const idx = r.cycle_index ?? 1;
+            if (!completedByCycle.has(idx)) {
+                completedByCycle.set(idx, { employee_name: r.employee_name, created_at: r.created_at });
+            }
+        }
         const checkStatusMap = await getCheckStatusForPositions(db, [
             { project_number: doc.project_number, position: doc.position, workstation },
         ]);
@@ -275,7 +287,11 @@ export const getDocumentById = async (req: Request, res: Response) => {
             // status/note) — the document viewer uses this to power a
             // per-cycle picker in the Check action, rather than only
             // showing the aggregate count.
-            cycles: checkStatus.cycles,
+            cycles: checkStatus.cycles.map((c) => ({
+                ...c,
+                completedBy: completedByCycle.get(c.cycleIndex)?.employee_name ?? null,
+                completedAt: completedByCycle.get(c.cycleIndex)?.created_at ?? null,
+            })),
             completion: latestCompletion
                 ? {
                       order_id: latestCompletion.order_id,

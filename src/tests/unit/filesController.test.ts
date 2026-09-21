@@ -717,6 +717,32 @@ describe("Files Controller", () => {
             );
         });
 
+        it("attaches who completed each cycle (for this document's workstation only) to the cycles list", async () => {
+            mockRequest = { params: { id: "1" } };
+            const doc = { id: 1, project_number: "P1", position: "10", document_type: 14 };
+            // Newest first. Motor's completer must never leak into Hardware's cycles.
+            const completionRows = [
+                { order_id: "m1", workstation: "Motor", status: "complete", cycle_index: 1, total_cycles: 2, max_total_cycles: 2, project_number: "P1", position: "10", employee_name: "Motor Guy", created_at: "2026-09-18T11:00:00Z" },
+                { order_id: "h1", workstation: "Hardware", status: "complete", cycle_index: 2, total_cycles: 2, max_total_cycles: 2, project_number: "P1", position: "10", employee_name: "Iveta S.", created_at: "2026-09-18T10:00:00Z" },
+                { order_id: "h1", workstation: "Hardware", status: "complete", cycle_index: 1, total_cycles: 2, max_total_cycles: 2, project_number: "P1", position: "10", employee_name: "Silvia D.", created_at: "2026-09-18T09:00:00Z" },
+            ];
+            const db = jest.fn((table: string) => {
+                if (table === "documents") return chain(doc);
+                if (table === "order_completion_log") return chain(completionRows);
+                if (table === "revisions") return chain(null);
+                return chain([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentById(mockRequest as Request, mockResponse as Response);
+
+            const body = mockJson.mock.calls[0][0];
+            expect(body.cycles.map((c: any) => [c.cycleIndex, c.completedBy])).toEqual([
+                [1, "Silvia D."],
+                [2, "Iveta S."],
+            ]);
+        });
+
         it("falls back to a null completion/status when no completion matches this document's type", async () => {
             mockRequest = { params: { id: "2" } };
             const doc = { id: 2, project_number: "P1", position: "10", document_type: 999 };
