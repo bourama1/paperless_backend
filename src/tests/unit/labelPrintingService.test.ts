@@ -99,6 +99,7 @@ import {
     extractDoorNumber,
     selectRowsForCycle,
     resolveTypeFilter,
+    resolveWorkplacePrinter,
     selectMotorBatchRows,
     LabelRow,
 } from "../../services/labelPrintingService";
@@ -657,5 +658,23 @@ describe("resolveTypeFilter — per-workplace label type narrowing (KM-SVM table
         const hw = resolveTypeFilter("Hardware")!;
         const motor = resolveTypeFilter("Motor")!;
         for (const type of svm) expect([type, hw(type) !== motor(type)]).toEqual([type, true]);
+    });
+});
+
+describe("resolveWorkplacePrinter — QR sticker language", () => {
+    const keys = ["LABEL_PRINTER_LANG_HARDWARE", "LABEL_QR_PRINTER_LANG_HARDWARE"];
+    const saved: Record<string, string | undefined> = {};
+    beforeEach(() => keys.forEach((k) => { saved[k] = process.env[k]; delete process.env[k]; }));
+    afterEach(() => keys.forEach((k) => { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }));
+
+    it("defaults to the workplace's own printer language", () => {
+        process.env.LABEL_PRINTER_LANG_HARDWARE = "ezpl";
+        expect(resolveWorkplacePrinter("Hardware")).toMatchObject({ lang: "ezpl", qrLang: "ezpl" });
+    });
+
+    it("lets a Godex keep EZPL barcode labels while sending its QR sticker as ZPL", () => {
+        process.env.LABEL_PRINTER_LANG_HARDWARE = "ezpl";
+        process.env.LABEL_QR_PRINTER_LANG_HARDWARE = "zpl";
+        expect(resolveWorkplacePrinter("Hardware")).toMatchObject({ lang: "ezpl", qrLang: "zpl" });
     });
 });

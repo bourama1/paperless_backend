@@ -1087,11 +1087,16 @@ function sendViaTcp(
  * Checks LABEL_PRINTER_UNC_<WORKPLACE> / LABEL_PRINTER_HOST_<WORKPLACE>
  * first, then falls back to the global LABEL_PRINTER_UNC_PATH / LABEL_PRINTER_HOST.
  */
-function resolveWorkplacePrinter(workplace: string): {
+export function resolveWorkplacePrinter(workplace: string): {
     uncPath: string;
     host: string;
     port: number;
     lang: "ezpl" | "zpl";
+    // Language used ONLY for QR stickers. Defaults to `lang`, but can be
+    // overridden separately (LABEL_QR_PRINTER_LANG_<WORKPLACE>) — e.g. a Godex
+    // whose barcode labels stay EZPL but which also accepts ZPL, so the QR
+    // sticker can be sent as a ZPL raster to that same printer.
+    qrLang: "ezpl" | "zpl";
     dpi: number;
 } {
     const key = workplace.toUpperCase().replace(/\s+/g, "_");
@@ -1106,10 +1111,12 @@ function resolveWorkplacePrinter(workplace: string): {
         ).toLowerCase() === "zpl"
             ? "zpl"
             : "ezpl";
+    const qrLangRaw = process.env[`LABEL_QR_PRINTER_LANG_${key}`];
+    const qrLang = qrLangRaw ? (qrLangRaw.toLowerCase() === "zpl" ? "zpl" : "ezpl") : lang;
     const dpi = process.env[`LABEL_PRINTER_DPI_${key}`]
         ? parseInt(process.env[`LABEL_PRINTER_DPI_${key}`]!, 10)
         : PRINTER_DPI;
-    return { uncPath, host, port, lang, dpi };
+    return { uncPath, host, port, lang, qrLang, dpi };
 }
 
 /**
@@ -1569,9 +1576,12 @@ export async function handleLabelPrinting(update: OrderUpdate): Promise<void> {
 // workplace (e.g. Hardware), the PNG is fitted to the same label stock and
 // rendered as its own ^GFA label job (documentPrinterService.
 // renderPngAsZplLabel), then sent through the exact same sendToLabelPrinter
-// connection the barcode label just used. EZPL-language workplaces have no
-// equivalent raster path yet and fall back to the shared documents printer
-// (DOCUMENTS_PRINTER_HOST) — see printQrPng.
+// connection the barcode label just used. The language used here is the
+// workplace's QR language (LABEL_QR_PRINTER_LANG_<WORKPLACE>, defaulting to
+// its barcode-label language), so a Godex printing EZPL barcode labels can
+// still get its QR stickers as ZPL. A QR language of EZPL has no raster path
+// yet and falls back to the shared documents printer (DOCUMENTS_PRINTER_HOST)
+// — see printQrPng.
 //
 // Environment variables:
 //   LABEL_TMP_FILES_PATH   path to the TMP*.TXT files
@@ -1705,7 +1715,7 @@ async function printQrPng(
     copies: number,
     workplace: string,
 ): Promise<void> {
-    const { uncPath, host, lang, dpi } = resolveWorkplacePrinter(workplace);
+    const { uncPath, host, qrLang: lang, dpi } = resolveWorkplacePrinter(workplace);
     const hardwareConfigured = !!(uncPath || host);
 
     if (lang === "zpl") {
@@ -1732,8 +1742,9 @@ async function printQrPng(
     }
 
     console.warn(
-        `[QR] Workplace "${workplace}" is EZPL-language — no same-printer QR path yet, ` +
-            "falling back to the shared documents printer",
+        `[QR] Workplace "${workplace}" QR language is EZPL — no same-printer QR path for that, ` +
+            "falling back to the shared documents printer. To send the QR as a ZPL raster to the " +
+            `workplace printer instead (e.g. a Godex that also accepts ZPL), set LABEL_QR_PRINTER_LANG_${workplace.toUpperCase().replace(/s+/g, "_")}=zpl`,
     );
     if (!DOCUMENTS_PRINTER_HOST || !isPrintingEnabled()) {
         const reason = !DOCUMENTS_PRINTER_HOST ? "DOCUMENTS_PRINTER_HOST empty" : "printing disabled via live config";
