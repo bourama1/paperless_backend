@@ -1284,6 +1284,10 @@ export function selectRowsForCycle(
 ): LabelRow[] {
     const isFirstCycle = cycleIndex === 1;
     const isLastCycle = cycleIndex === totalCycles;
+    // A single-cycle order has one door, so every row belongs to it — the
+    // "N/M" in packageType is then a box counter ("hardware 3/5"), not a
+    // door number, and must not drop boxes 2..M.
+    if (totalCycles <= 1) return labelRows;
     return labelRows.filter((row) => {
         const doorNumber = extractDoorNumber(row.packageType);
         if (doorNumber !== null) return doorNumber === cycleIndex;

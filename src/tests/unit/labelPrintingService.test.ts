@@ -678,3 +678,17 @@ describe("resolveWorkplacePrinter — QR sticker language", () => {
         expect(resolveWorkplacePrinter("Hardware")).toMatchObject({ lang: "ezpl", qrLang: "zpl" });
     });
 });
+
+describe("selectRowsForCycle — single-cycle order", () => {
+    it("keeps every box even though packageType reads 'hardware 3/5'", () => {
+        const rows = parseSampleCsv(
+            [1, 2, 3, 4, 5]
+                .map(
+                    (n) =>
+                        `"moutings";"220286";"604523";"";"hardware ${n}/5";"010";"C${n}";"T${n}";"Z1";"0222";"4";"x";"19";"TMP.TXT";"";"c";"a";"b";"PL|Poland"`,
+                )
+                .join("\n"),
+        );
+        expect(selectRowsForCycle(rows, 1, 1)).toHaveLength(5);
+    });
+});
