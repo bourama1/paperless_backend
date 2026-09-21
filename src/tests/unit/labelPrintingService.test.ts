@@ -11,9 +11,9 @@ const sampleCountryCodes = JSON.stringify({
 
 // Mirrors the real config/label-type-config.json shape, with entries for the
 // two label types used in sampleCsvContent below: "section" (door-leaf/wing
-// group) and "t01_hw_kr" (hardware/motor group's Hardware-specific subset —
+// group) and "t10_hw_kr" (hardware/motor group's Hardware-specific subset —
 // see WORKPLACE_TYPE_FILTER, which splits that shared scan-prefix group by
-// "_hw_kr" suffix between the Hardware and Motor workplaces) — so tests
+// explicit per-workplace type lists) — so tests
 // exercise the real workplace → scan-prefix → parametry matching path
 // instead of an empty config.
 const sampleParametryConfig = JSON.stringify([
@@ -30,7 +30,7 @@ const sampleParametryConfig = JSON.stringify([
     {
         scanB: "KM-SVM ",
         scanC: 'K"žSV" ',
-        type: "t01_hw_kr",
+        type: "t10_hw_kr",
         printPrimary: "Ano",
         printSecondary: "Ne",
         copies: 1,
@@ -98,6 +98,7 @@ import {
     handleQrSticker,
     extractDoorNumber,
     selectRowsForCycle,
+    resolveTypeFilter,
     selectMotorBatchRows,
     LabelRow,
 } from "../../services/labelPrintingService";
@@ -165,7 +166,7 @@ const sampleCsvContent = [
     // packageType "1/4" here matches mockOrderUpdate's cycleIndex (1) below —
     // these dry-run/dedup tests aren't about door-matching itself, which is
     // covered separately further down using the real uploaded CSV samples.
-    't01_hw_kr;"Customer";"SO-001";"Part2";"1/4";"01";"123457";"789013";"PO-001";"001235";"R1";"Germ.";"1.0";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
+    't10_hw_kr;"Customer";"SO-001";"Part2";"1/4";"01";"123457";"789013";"PO-001";"001235";"R1";"Germ.";"1.0";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
 ].join("\n");
 
 describe("Label Printing Service", () => {
@@ -259,14 +260,14 @@ describe("Label Printing Service", () => {
         // (Hardware's "*_hw_kr" rows, plus "section"/"motor"/"mot_prisl2" for
         // other stations) sharing one TMP*.TXT reference — but only some of
         // those rows actually carry the tmpFile column filled in (here:
-        // "motor", not the Hardware-matching "t01_hw_kr" row). Printing was
+        // "motor", not the Hardware-matching "t10_hw_kr" row). Printing was
         // narrowing the CSV down to just the current workplace's matching
         // rows BEFORE handing off to the QR sticker step, so a TMP file that
         // only appeared on a row for a different workplace was invisible to
         // it — see the labelRows/matchedRows split in handleLabelPrinting.
         it("finds the TMP*.TXT reference for the QR sticker even when it only appears on a row for a different workplace", async () => {
             const csv = [
-                't01_hw_kr;"Customer";"SO-001";"Part1";"1/1";"01";"123456";"789012";"PO-001";"001234";"R1";"Germ.";"0.5";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
+                't10_hw_kr;"Customer";"SO-001";"Part1";"1/1";"01";"123456";"789012";"PO-001";"001234";"R1";"Germ.";"0.5";;;"Delivery GmbH";"Main St 1";"12345";"Germ."',
                 'motor;"Customer";"SO-001";"";"Motor 1/1";"01";"123457";"789013";"PO-001";"001235";"R1";"Germ.";"1.0";"TMP999.TXT";;"Delivery GmbH";"Main St 1";"12345";"Germ."',
             ].join("\n");
             (fs.readFileSync as jest.Mock).mockImplementation((p: string) => {
@@ -629,5 +630,32 @@ describe("handleLabelPrinting — Motor workstation batch printing (integration)
         // which is what order.quantity alone (ignoring maxCycle) produced.
         expect(cycle1).toEqual(["Cube accessories 1/2", "Motor Cube 1/2"]);
         expect(cycle2).toEqual(["Cube accessories 2/2", "Motor Cube 2/2"]);
+    });
+});
+
+describe("resolveTypeFilter — per-workplace label type narrowing (KM-SVM table)", () => {
+    const HARDWARE = ["moutings", "lista_motor", "zavora", "triang. plate", "numbers", "t10_hw_kr", "t21_hw_kr", "t25_hw_kr", "t29_hw_kr", "t11_hw_kr", "t15_hw_kr"];
+    const MOTOR = ["motor", "svet_mriz", "mot_prisl", "t29_mot", "ridici_jedn", "t15_mot", "mot_prisl2", "prisl3", "prisl4"];
+
+    it("Hardware prints exactly its own types and none of Motor's", () => {
+        const hw = resolveTypeFilter("Hardware")!;
+        for (const type of HARDWARE) expect([type, hw(type)]).toEqual([type, true]);
+        for (const type of MOTOR) expect([type, hw(type)]).toEqual([type, false]);
+    });
+
+    it("Motor prints exactly its own types and none of Hardware's", () => {
+        const motor = resolveTypeFilter("Motor")!;
+        for (const type of MOTOR) expect([type, motor(type)]).toEqual([type, true]);
+        for (const type of HARDWARE) expect([type, motor(type)]).toEqual([type, false]);
+    });
+
+    it("the two lists together cover every type configured under KM-SVM, each in exactly one", () => {
+        const config = JSON.parse(
+            jest.requireActual("fs").readFileSync(require("path").join(__dirname, "../../../config/label-type-config.json"), "utf8"),
+        );
+        const svm: string[] = config.filter((e: any) => e.scanB === "KM-SVM ").map((e: any) => e.type);
+        const hw = resolveTypeFilter("Hardware")!;
+        const motor = resolveTypeFilter("Motor")!;
+        for (const type of svm) expect([type, hw(type) !== motor(type)]).toEqual([type, true]);
     });
 });

@@ -127,27 +127,55 @@ function resolveScanPrefix(workplace: string): string | undefined {
 // ─── per-workplace type narrowing ──────────────────────────────────────────
 //
 // "Motor" and "Hardware" (and "Předmontáž optolišty") all share the same
-// SCAN_PREFIX.HARDWARE group, because in the original barcode-driven flow
-// they were one physical package. Now that printing is triggered per real
+// SCAN_PREFIX.HARDWARE group (KM-SVM), because in the original barcode-driven
+// flow they were one physical package. Now that printing is triggered per real
 // production station, they need separate label subsets even though they
 // resolve to the same scan prefix.
 //
-// Confirmed against label-type-config.json: of the 20 types under
-// SCAN_PREFIX.HARDWARE, the "*_hw_kr" suffixed ones (t10_hw_kr, t21_hw_kr,
-// t25_hw_kr, t29_hw_kr, t11_hw_kr, t15_hw_kr) are the hardware+door-leaf
-// combo sticker printed at the Hardware station; every other type in that
-// group (motor, mot_prisl, lista_motor, zavora, ...) belongs to Motor.
+// The split is an explicit allow-list per workplace, taken from the
+// workplace/label-type table maintained by the plant (every one of the 20
+// types in the KM-SVM group belongs to exactly one of the two, so nothing
+// prints twice and nothing is left out). A type missing from a list simply
+// doesn't print at that workplace — add new KM-SVM types to the right list.
 //
 // Workplaces not listed here get every type that matches their scan prefix,
 // unfiltered — this only narrows within a scan-prefix group that's shared
 // by more than one workplace.
+const HARDWARE_LABEL_TYPES = new Set([
+    "moutings",
+    "lista_motor",
+    "zavora",
+    "triang. plate",
+    "numbers",
+    "t10_hw_kr",
+    "t21_hw_kr",
+    "t25_hw_kr",
+    "t29_hw_kr",
+    "t11_hw_kr",
+    "t15_hw_kr",
+]);
+
+const MOTOR_LABEL_TYPES = new Set([
+    "motor",
+    "svet_mriz",
+    "mot_prisl",
+    "t29_mot",
+    "ridici_jedn",
+    "t15_mot",
+    "mot_prisl2",
+    "prisl3",
+    "prisl4",
+]);
+
 const WORKPLACE_TYPE_FILTER: Record<string, (labelType: string) => boolean> = {
-    motor: (labelType) => !labelType.endsWith("_hw_kr"),
-    hardware: (labelType) => labelType.endsWith("_hw_kr"),
+    motor: (labelType) => MOTOR_LABEL_TYPES.has(labelType),
+    hardware: (labelType) => HARDWARE_LABEL_TYPES.has(labelType),
+    // Not part of the table above — keeps its previous behavior (only the
+    // "*_hw_kr" combo stickers).
     predmontazoptolisty: (labelType) => labelType.endsWith("_hw_kr"),
 };
 
-function resolveTypeFilter(
+export function resolveTypeFilter(
     workplace: string,
 ): ((labelType: string) => boolean) | undefined {
     return WORKPLACE_TYPE_FILTER[normalizeWorkplace(workplace)];
