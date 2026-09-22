@@ -202,7 +202,9 @@ export function applyDuplexToBuffer(
  * Parses a raw PBM (P4) buffer — as produced by Ghostscript's pbmraw device
  * — into its pixel dimensions and packed 1bpp row data.
  */
-export function parsePbmRaw(pbm: Buffer): { width: number; height: number; data: Buffer } {
+export function parsePbmRaw(
+    pbm: Buffer,
+): { width: number; height: number; data: Buffer; bytesConsumed: number } {
     if (pbm[0] !== 0x50 || pbm[1] !== 0x34) {
         // "P4"
         throw new Error("Expected a raw PBM (P4) buffer from Ghostscript's pbmraw device");
@@ -227,8 +229,27 @@ export function parsePbmRaw(pbm: Buffer): { width: number; height: number; data:
 
     const [width, height] = dims as [number, number];
     const bytesPerRow = Math.ceil(width / 8);
-    const data = pbm.subarray(offset, offset + bytesPerRow * height);
-    return { width, height, data };
+    const bytesConsumed = offset + bytesPerRow * height;
+    const data = pbm.subarray(offset, bytesConsumed);
+    return { width, height, data, bytesConsumed };
+}
+
+/**
+ * Splits a Ghostscript pbmraw stream into its individual per-page PBM
+ * buffers. For a multi-page PDF, pbmraw emits one "P4\n<w> <h>\n<data>"
+ * image per page, back-to-back with no separator — reading only the first
+ * one (as parsePbmRaw/pbmRawToZplLabel alone would) silently drops every
+ * page after it.
+ */
+export function splitPbmRawPages(pbm: Buffer): Buffer[] {
+    const pages: Buffer[] = [];
+    let offset = 0;
+    while (offset < pbm.length) {
+        const { bytesConsumed } = parsePbmRaw(pbm.subarray(offset));
+        pages.push(pbm.subarray(offset, offset + bytesConsumed));
+        offset += bytesConsumed;
+    }
+    return pages;
 }
 
 /**
@@ -275,7 +296,11 @@ export async function renderPdfToZplBuffer(pdfPath: string, dpi: number): Promis
         { timeout: 60_000, encoding: "buffer" as any, maxBuffer: 1024 * 1024 * 50 },
     );
 
-    return pbmRawToZplLabel(stdout as unknown as Buffer);
+    // One ^XA...^XZ label per PDF page (see splitPbmRawPages) — a
+    // multi-page prep label (one page per door/box) must print every page,
+    // not just the first.
+    const pages = splitPbmRawPages(stdout as unknown as Buffer);
+    return Buffer.concat(pages.map(pbmRawToZplLabel));
 }
 
 /**
@@ -930,7 +955,7 @@ export function buildPrepLabelPdf(
 
         if (pageCount > 1) {
             lines.push(
-                { text: "BALEN\xcd", size: 10, y: 295 },
+                { text: "VRATA", size: 10, y: 295 },
                 { text: `${cycleIndex}/${pageCount}`, size: 20, y: 318, bold: true },
             );
         }

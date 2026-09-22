@@ -3,6 +3,7 @@ import {
     applyDuplexToBuffer,
     parsePbmRaw,
     pbmRawToZplLabel,
+    splitPbmRawPages,
     buildPdfFromPngFitted,
     PngInfo,
 } from "../../services/documentPrinterService";
@@ -29,7 +30,7 @@ describe("buildPrepLabelPdf", () => {
 
         expect(pdf.startsWith("%PDF-1.4")).toBe(true);
         expect(pdf).toContain("/Count 1");
-        expect(pdf).not.toContain("BALENI");
+        expect(pdf).not.toContain("VRATA");
         expect(pdf.match(/\d+ 0 obj/g)).toHaveLength(6);
     });
 
@@ -37,6 +38,7 @@ describe("buildPrepLabelPdf", () => {
         const pdf = buildPrepLabelPdf("P1", "10", "Jan Novak", 3).toString("latin1");
 
         expect(pdf).toContain("/Count 3");
+        expect(pdf).toContain("VRATA");
         expect(pdf).toContain("(1/3)");
         expect(pdf).toContain("(2/3)");
         expect(pdf).toContain("(3/3)");
@@ -253,6 +255,29 @@ describe("parsePbmRaw", () => {
 
     it("throws on a buffer that isn't a raw PBM (P4)", () => {
         expect(() => parsePbmRaw(Buffer.from("P5\n8 2\n", "ascii"))).toThrow();
+    });
+});
+
+describe("splitPbmRawPages", () => {
+    it("splits a Ghostscript multi-page pbmraw stream into one buffer per page", () => {
+        // Same shape Ghostscript emits for a multi-page PDF: N "P4\nW H\n<data>"
+        // images concatenated back-to-back with no separator.
+        const page1 = makePbmRaw(8, 2, [0xf0, 0x0f]);
+        const page2 = makePbmRaw(8, 1, [0xaa]);
+        const page3 = makePbmRaw(16, 1, [0xff, 0x00]);
+        const stream = Buffer.concat([page1, page2, page3]);
+
+        const pages = splitPbmRawPages(stream);
+
+        expect(pages).toHaveLength(3);
+        expect(parsePbmRaw(pages[0]!).data.equals(Buffer.from([0xf0, 0x0f]))).toBe(true);
+        expect(parsePbmRaw(pages[1]!).data.equals(Buffer.from([0xaa]))).toBe(true);
+        expect(parsePbmRaw(pages[2]!).data.equals(Buffer.from([0xff, 0x00]))).toBe(true);
+    });
+
+    it("returns a single page for a single-page stream", () => {
+        const stream = makePbmRaw(8, 2, [0xf0, 0x0f]);
+        expect(splitPbmRawPages(stream)).toHaveLength(1);
     });
 });
 
