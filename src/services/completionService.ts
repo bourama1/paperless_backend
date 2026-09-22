@@ -244,6 +244,149 @@ export const getCompletionQueue = async (
     }));
 };
 
+export interface ProductStat {
+    productDesc: string;
+    count: number;
+}
+
+// Parses a "YYYY-MM-DD" query param into a local-midnight Date, or returns
+// `fallback` if missing/malformed — never throws, since a bad param should
+// just fall back rather than 500 the stats tab.
+function parseDayParam(value: unknown, fallback: Date): Date {
+    if (typeof value === "string") {
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+        if (m) return new Date(+m[1]!, +m[2]! - 1, +m[3]!);
+    }
+    return fallback;
+}
+
+function sortedCounts(counts: Map<string, number>): ProductStat[] {
+    return Array.from(counts, ([productDesc, count]) => ({ productDesc, count })).sort(
+        (a, b) => b.count - a.count,
+    );
+}
+
+/** "completed" = every FINISHED cycle (a door physically finished at the
+ * workstation). "checked" = only cycles that also got an "ok" QC check
+ * (order_cycle_checks) — see getCheckedProductStats below. */
+export type ProductStatsStage = "completed" | "checked";
+
+async function getCompletedProductStats(
+    startDay: Date,
+    rangeEnd: Date,
+): Promise<ProductStat[]> {
+    const db = await getDb();
+    const rows: { order_snapshot: string }[] = await db("workstation_log")
+        .where("action", "FINISHED")
+        .andWhere("created_at", ">=", startDay)
+        .andWhere("created_at", "<", rangeEnd)
+        .select("order_snapshot");
+
+    const counts = new Map<string, number>();
+    for (const row of rows) {
+        if (!row.order_snapshot) continue;
+        let productDesc: string;
+        try {
+            productDesc = JSON.parse(row.order_snapshot).productDesc || "Unknown";
+        } catch {
+            continue;
+        }
+        counts.set(productDesc, (counts.get(productDesc) ?? 0) + 1);
+    }
+    return sortedCounts(counts);
+}
+
+/**
+ * Same tally as getCompletedProductStats, but only for cycles that were
+ * ALSO QC-checked ("ok" in order_cycle_checks) in the range — "we finished
+ * it AND someone signed off on it", not just "it went through the
+ * station". order_cycle_checks has no productDesc (or order_id) of its
+ * own, so this joins by hand in JS: it maps every checked cycle to a
+ * project_number+position+workstation+cycle_index key, then looks that key
+ * up against FINISHED workstation_log snapshots (the only place
+ * productDesc is recorded) for the workstations actually checked.
+ * ponytail: scans every FINISHED row for those workstations, unbounded by
+ * date, since a check can land well after its cycle finished — fine at
+ * today's volume, revisit (e.g. index/cap by order age) if this gets slow.
+ */
+async function getCheckedProductStats(
+    startDay: Date,
+    rangeEnd: Date,
+): Promise<ProductStat[]> {
+    const db = await getDb();
+    const checkRows: {
+        project_number: string;
+        position: string;
+        workstation: string;
+        cycle_index: number;
+    }[] = await db("order_cycle_checks")
+        .where("status", "ok")
+        .andWhere("created_at", ">=", startDay)
+        .andWhere("created_at", "<", rangeEnd)
+        .select("project_number", "position", "workstation", "cycle_index");
+
+    if (checkRows.length === 0) return [];
+
+    const checkKey = (r: { project_number: string; position: string; workstation: string; cycle_index: number }) =>
+        `${r.project_number}||${r.position}||${r.workstation}||${r.cycle_index}`;
+    // A cycle can be checked more than once (re-verified after a fix) —
+    // count it once.
+    const checkedKeys = new Set(checkRows.map(checkKey));
+
+    const workstations = Array.from(new Set(checkRows.map((r) => r.workstation)));
+    const snapRows: { order_snapshot: string; cycle_index: number }[] = await db("workstation_log")
+        .where("action", "FINISHED")
+        .whereIn("workstation_name", workstations)
+        .select("order_snapshot", "cycle_index");
+
+    const productDescByKey = new Map<string, string>();
+    for (const row of snapRows) {
+        if (!row.order_snapshot) continue;
+        let order: any;
+        try {
+            order = JSON.parse(row.order_snapshot);
+        } catch {
+            continue;
+        }
+        const key = `${order.projectNumber}||${order.position}||${order.workplace}||${row.cycle_index}`;
+        productDescByKey.set(key, order.productDesc || "Unknown");
+    }
+
+    const counts = new Map<string, number>();
+    for (const key of checkedKeys) {
+        const productDesc = productDescByKey.get(key) || "Unknown";
+        counts.set(productDesc, (counts.get(productDesc) ?? 0) + 1);
+    }
+    return sortedCounts(counts);
+}
+
+/**
+ * How many cycles (doors/units) fall into `stage` in [from, to] (inclusive,
+ * server-local calendar days), grouped by the order's productDesc (e.g.
+ * "Hardware (Indy)") — the tally behind the stats tab. `from`/`to` are
+ * "YYYY-MM-DD"; omitting both defaults to today only.
+ */
+export const getProductStats = async (
+    from?: string,
+    to?: string,
+    stage: ProductStatsStage = "completed",
+): Promise<ProductStat[]> => {
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startDay = parseDayParam(from, today);
+    const endDay = parseDayParam(to, startDay);
+    // Exclusive upper bound — the day after `to`, at local midnight.
+    const rangeEnd = new Date(
+        endDay.getFullYear(),
+        endDay.getMonth(),
+        endDay.getDate() + 1,
+    );
+
+    return stage === "checked"
+        ? getCheckedProductStats(startDay, rangeEnd)
+        : getCompletedProductStats(startDay, rangeEnd);
+};
+
 export const ORDER_CHECK_STATUSES = ["ok", "issue"] as const;
 export type OrderCheckStatus = (typeof ORDER_CHECK_STATUSES)[number];
 

@@ -16,6 +16,7 @@ import {
     getCompletionQueueHandler,
     createPrepLabel,
     createOrderCheck,
+    getStatsHandler,
 } from "../controllers/completionController";
 
 const router = Router();
@@ -30,6 +31,7 @@ router.get("/resolve-scan", resolveScanHandler);
 router.get("/pbom-types", listPbomTypesHandler);
 router.post("/order-completion", createOrderCompletion);
 router.get("/completion-queue", getCompletionQueueHandler);
+router.get("/stats", getStatsHandler);
 router.post("/print-prep-label", createPrepLabel);
 router.post("/order-check", createOrderCheck);
 router.post("/save-edited", saveEdited);

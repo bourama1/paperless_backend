@@ -8,6 +8,7 @@ import {
     isValidCompletionStatus,
     isValidCheckStatus,
     getCompletionQueue,
+    getProductStats,
 } from "../services/completionService";
 import { buildPrepLabelPdf, printPrepLabelBuffer } from "../services/documentPrinterService";
 import { getDb, getNormsDb } from "../config/database";
@@ -225,6 +226,25 @@ export const getCompletionQueueHandler = async (req: Request, res: Response) => 
         res.json(queue);
     } catch (error) {
         console.error("Error fetching completion queue:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+// `from`/`to` are "YYYY-MM-DD"; both optional, defaulting to today only
+// (see getProductStats) — lets the stats tab page through whole weeks.
+// `stage` is "completed" (default) or "checked".
+export const getStatsHandler = async (req: Request, res: Response) => {
+    try {
+        const { from, to, stage } = req.query;
+        res.json(
+            await getProductStats(
+                typeof from === "string" ? from : undefined,
+                typeof to === "string" ? to : undefined,
+                stage === "checked" ? "checked" : "completed",
+            ),
+        );
+    } catch (error) {
+        console.error("Error fetching stats:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 };
