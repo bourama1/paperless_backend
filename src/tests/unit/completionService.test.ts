@@ -5,6 +5,11 @@ import {
     recordOrderCompletion,
     getCompletionQueue,
     getProductStats,
+    listEmployees,
+    listEmployeesForAdmin,
+    addEmployee,
+    renameEmployee,
+    setEmployeeActive,
 } from "../../services/completionService";
 import { thenable } from "../helpers/thenable";
 
@@ -448,5 +453,105 @@ describe("getProductStats", () => {
             expect(result).toEqual([]);
             expect(db).not.toHaveBeenCalledWith("workstation_log");
         });
+    });
+});
+
+describe("employees", () => {
+    beforeEach(() => {
+        jest.clearAllMocks();
+    });
+
+    function chainableRows(rows: any[]) {
+        const chain: any = {};
+        for (const m of ["where", "select", "insert", "onConflict", "merge", "update"]) {
+            chain[m] = jest.fn().mockReturnValue(chain);
+        }
+        chain.orderBy = jest.fn().mockResolvedValue(rows);
+        chain.returning = jest.fn().mockResolvedValue(rows);
+        return chain;
+    }
+
+    it("listEmployees only returns active employees", async () => {
+        const chain = chainableRows([{ id: 1, name: "Jan Novak" }]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        const result = await listEmployees();
+
+        expect(db).toHaveBeenCalledWith("employees");
+        expect(chain.where).toHaveBeenCalledWith({ active: true });
+        expect(result).toEqual([{ id: 1, name: "Jan Novak" }]);
+    });
+
+    it("listEmployeesForAdmin returns everyone, active or hidden", async () => {
+        const rows = [
+            { id: 1, name: "Jan Novak", active: true },
+            { id: 2, name: "Petr Svoboda", active: false },
+        ];
+        const chain = chainableRows(rows);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        const result = await listEmployeesForAdmin();
+
+        expect(chain.where).not.toHaveBeenCalled();
+        expect(result).toEqual(rows);
+    });
+
+    it("addEmployee inserts active:true and un-hides on a name conflict", async () => {
+        const chain = chainableRows([{ id: 1, name: "Jan Novak" }]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await addEmployee("Jan Novak");
+
+        expect(chain.insert).toHaveBeenCalledWith({ name: "Jan Novak", active: true });
+        expect(chain.onConflict).toHaveBeenCalledWith("name");
+        expect(chain.merge).toHaveBeenCalledWith(["active"]);
+    });
+
+    it("addEmployee rejects a blank name", async () => {
+        await expect(addEmployee("   ")).rejects.toThrow("name is required");
+    });
+
+    it("renameEmployee updates the name and returns the row", async () => {
+        const chain = chainableRows([{ id: 1, name: "New Name" }]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        const result = await renameEmployee(1, "New Name");
+
+        expect(chain.where).toHaveBeenCalledWith({ id: 1 });
+        expect(chain.update).toHaveBeenCalledWith({ name: "New Name" });
+        expect(result).toEqual({ id: 1, name: "New Name" });
+    });
+
+    it("renameEmployee throws when the id doesn't exist", async () => {
+        const chain = chainableRows([]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await expect(renameEmployee(999, "Nobody")).rejects.toThrow("Employee not found");
+    });
+
+    it("setEmployeeActive(false) hides without deleting the row", async () => {
+        const chain = chainableRows([{ id: 1, name: "Jan Novak" }]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await setEmployeeActive(1, false);
+
+        expect(chain.update).toHaveBeenCalledWith({ active: false });
+        expect(db).not.toHaveBeenCalledWith(expect.anything(), "delete");
+    });
+
+    it("setEmployeeActive(true) restores a hidden employee", async () => {
+        const chain = chainableRows([{ id: 1, name: "Jan Novak" }]);
+        const db = jest.fn(() => chain);
+        (getDb as jest.Mock).mockResolvedValue(db);
+
+        await setEmployeeActive(1, true);
+
+        expect(chain.update).toHaveBeenCalledWith({ active: true });
     });
 });

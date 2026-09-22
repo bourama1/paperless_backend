@@ -32,6 +32,10 @@ export interface Employee {
     name: string;
 }
 
+export interface EmployeeAdmin extends Employee {
+    active: boolean;
+}
+
 export const ORDER_COMPLETION_STATUSES = [
     "complete",
     // Same as "complete" in every way (archival, counting toward
@@ -58,9 +62,21 @@ export function isValidCompletionStatus(
     return (ORDER_COMPLETION_STATUSES as readonly string[]).includes(status);
 }
 
+// Every "who did this" picker across the app (kiosk, prep label, finish
+// order, QC check) — hidden (active=false) employees never show up here.
 export const listEmployees = async (): Promise<Employee[]> => {
     const db = await getDb();
-    return db("employees").select("id", "name").orderBy("name", "asc");
+    return db("employees")
+        .where({ active: true })
+        .select("id", "name")
+        .orderBy("name", "asc");
+};
+
+// The admin employee list — everyone, including hidden ones, so a hidden
+// name can be found again and restored.
+export const listEmployeesForAdmin = async (): Promise<EmployeeAdmin[]> => {
+    const db = await getDb();
+    return db("employees").select("id", "name", "active").orderBy("name", "asc");
 };
 
 export const addEmployee = async (name: string): Promise<Employee> => {
@@ -70,10 +86,48 @@ export const addEmployee = async (name: string): Promise<Employee> => {
         throw new Error("name is required");
     }
     const [row] = await db("employees")
-        .insert({ name: trimmed })
+        .insert({ name: trimmed, active: true })
         .onConflict("name")
-        .merge() // idempotent: re-adding an existing name just returns it
+        // Re-adding a name that was previously hidden un-hides it, rather
+        // than silently doing nothing — the admin typed that exact name to
+        // bring it back.
+        .merge(["active"])
         .returning(["id", "name"]);
+    return row;
+};
+
+export const renameEmployee = async (id: number, name: string): Promise<Employee> => {
+    const db = await getDb();
+    const trimmed = name.trim();
+    if (!trimmed) {
+        throw new Error("name is required");
+    }
+    const [row] = await db("employees")
+        .where({ id })
+        .update({ name: trimmed })
+        .returning(["id", "name"]);
+    if (!row) {
+        throw new Error("Employee not found");
+    }
+    return row;
+};
+
+// "Delete" only ever hides — past completion/check/prep-log rows still
+// reference this name in plain text, not a foreign key, so a real DELETE
+// would just orphan that history's display. active=false hides it from
+// every picker; setEmployeeActive(id, true) undoes it.
+export const setEmployeeActive = async (
+    id: number,
+    active: boolean,
+): Promise<Employee> => {
+    const db = await getDb();
+    const [row] = await db("employees")
+        .where({ id })
+        .update({ active })
+        .returning(["id", "name"]);
+    if (!row) {
+        throw new Error("Employee not found");
+    }
     return row;
 };
 

@@ -43,3 +43,30 @@ export function apiKeyAuth(req: Request, res: Response, next: NextFunction) {
 
     next();
 }
+
+// Second factor for the hidden employee-admin screen — the mobile app
+// still needs a valid X-API-Key to reach these routes at all (apiKeyAuth
+// above runs first), this just additionally requires a separate PIN the
+// factory floor doesn't otherwise know, since creating/renaming/hiding
+// employee names shouldn't be one tap away for anyone with the app.
+export function adminPinAuth(req: Request, res: Response, next: NextFunction) {
+    const pin = process.env.EMPLOYEE_ADMIN_PIN;
+
+    if (!pin) {
+        // Fail closed, same reasoning as apiKeyAuth: an unset PIN must
+        // never mean "admin routes are open to anyone".
+        console.error(
+            "[AUTH] EMPLOYEE_ADMIN_PIN is not set — rejecting all employee-admin requests.",
+        );
+        res.status(500).json({ error: "Admin PIN not configured" });
+        return;
+    }
+
+    const provided = req.header("X-Admin-Pin");
+    if (!provided || provided !== pin) {
+        res.status(401).json({ error: "Invalid PIN" });
+        return;
+    }
+
+    next();
+}

@@ -1,6 +1,6 @@
 import request from "supertest";
 import express from "express";
-import { apiKeyAuth } from "../../middleware/apiKeyAuth";
+import { apiKeyAuth, adminPinAuth } from "../../middleware/apiKeyAuth";
 
 function buildApp() {
     const app = express();
@@ -76,5 +76,49 @@ describe("apiKeyAuth middleware", () => {
         process.env.API_KEY = "secret";
         const response = await request(buildApp()).get("/protected?apiKey=wrong-key");
         expect(response.status).toBe(401);
+    });
+});
+
+describe("adminPinAuth middleware", () => {
+    const ORIGINAL_PIN = process.env.EMPLOYEE_ADMIN_PIN;
+
+    function buildPinApp() {
+        const app = express();
+        app.get("/employees/admin", adminPinAuth, (req, res) => res.json({ status: "ok" }));
+        return app;
+    }
+
+    afterEach(() => {
+        process.env.EMPLOYEE_ADMIN_PIN = ORIGINAL_PIN;
+    });
+
+    it("responds 500 when EMPLOYEE_ADMIN_PIN is not configured, even with a header sent", async () => {
+        delete process.env.EMPLOYEE_ADMIN_PIN;
+        const response = await request(buildPinApp())
+            .get("/employees/admin")
+            .set("X-Admin-Pin", "1234");
+        expect(response.status).toBe(500);
+    });
+
+    it("rejects requests with no X-Admin-Pin header", async () => {
+        process.env.EMPLOYEE_ADMIN_PIN = "1234";
+        const response = await request(buildPinApp()).get("/employees/admin");
+        expect(response.status).toBe(401);
+    });
+
+    it("rejects requests with the wrong PIN", async () => {
+        process.env.EMPLOYEE_ADMIN_PIN = "1234";
+        const response = await request(buildPinApp())
+            .get("/employees/admin")
+            .set("X-Admin-Pin", "0000");
+        expect(response.status).toBe(401);
+    });
+
+    it("allows requests with the correct PIN", async () => {
+        process.env.EMPLOYEE_ADMIN_PIN = "1234";
+        const response = await request(buildPinApp())
+            .get("/employees/admin")
+            .set("X-Admin-Pin", "1234");
+        expect(response.status).toBe(200);
     });
 });

@@ -591,4 +591,17 @@ const setupDatabase = async (targetDb: Knex) => {
             table.string("workstation");
         });
     }
+
+    // 22. active column on employees — the admin employee list's "delete"
+    // only ever hides a name (active=false) instead of a real DELETE, since
+    // past completion/check/prep-log rows still reference it by name, not
+    // by a foreign key — removing the row would just make that history
+    // show a name that no longer resolves to anyone. listEmployees (the
+    // kiosk "who did this" pickers) filters to active=true; the admin
+    // screen lists everyone. Defaults true so existing rows stay visible.
+    if (!(await targetDb.schema.hasColumn("employees", "active"))) {
+        await targetDb.schema.alterTable("employees", (table) => {
+            table.boolean("active").notNullable().defaultTo(true);
+        });
+    }
 };

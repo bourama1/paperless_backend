@@ -1,7 +1,10 @@
 import { Request, Response } from "express";
 import {
     listEmployees,
+    listEmployeesForAdmin,
     addEmployee,
+    renameEmployee,
+    setEmployeeActive,
     recordOrderCompletion,
     recordOrderPreparation,
     recordOrderCheck,
@@ -107,6 +110,54 @@ export const createEmployee = async (req: Request, res: Response) => {
         res.status(500).json({ error: "Internal server error" });
     }
 };
+
+// ── Hidden employee-admin screen (see routes/employees.ts — everything
+// under /employees/admin requires adminPinAuth on top of the normal
+// X-API-Key) ──────────────────────────────────────────────────────────────
+
+export const getEmployeesAdmin = async (req: Request, res: Response) => {
+    try {
+        res.json(await listEmployeesForAdmin());
+    } catch (error) {
+        console.error("Error fetching employees (admin):", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const updateEmployee = async (req: Request, res: Response) => {
+    const { name } = req.body;
+    if (!name || typeof name !== "string" || !name.trim()) {
+        return res.status(400).json({ error: "name is required" });
+    }
+    try {
+        res.json(await renameEmployee(Number(req.params.id), name));
+    } catch (error: any) {
+        if (error.message === "Employee not found") {
+            return res.status(404).json({ error: error.message });
+        }
+        console.error("Error renaming employee:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+async function setEmployeeActiveHandler(req: Request, res: Response, active: boolean) {
+    try {
+        res.json(await setEmployeeActive(Number(req.params.id), active));
+    } catch (error: any) {
+        if (error.message === "Employee not found") {
+            return res.status(404).json({ error: error.message });
+        }
+        console.error(`Error ${active ? "restoring" : "hiding"} employee:`, error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+}
+
+// "Delete" — hides, never a real DELETE (see setEmployeeActive).
+export const hideEmployee = (req: Request, res: Response) =>
+    setEmployeeActiveHandler(req, res, false);
+
+export const restoreEmployee = (req: Request, res: Response) =>
+    setEmployeeActiveHandler(req, res, true);
 
 export const createOrderCompletion = async (req: Request, res: Response) => {
     const {
