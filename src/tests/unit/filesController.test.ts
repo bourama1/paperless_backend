@@ -152,6 +152,17 @@ describe("Files Controller", () => {
                 if (table === "subquery") return chainable(mockOclRows);
                 if (table === "documents") return chainable(mockDocumentRows);
                 if (table === "revisions") return chainable(mockRevisionRows);
+                // Real production order_completion_log rows behind the
+                // joined "subquery" mock above — a position only appears
+                // in the overview at all because of a row like this, so a
+                // real run always has one; supplied here too so the
+                // check-status lookup sees cycle 1 as actually finished.
+                if (table === "order_completion_log") {
+                    return chainable([
+                        { project_number: "P1", position: "10", workstation: "Hardware", cycle_index: 1, max_total_cycles: 1 },
+                        { project_number: "P2", position: "20", workstation: "Hardware", cycle_index: 1, max_total_cycles: 1 },
+                    ]);
+                }
                 return chainable([]);
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -339,6 +350,15 @@ describe("Files Controller", () => {
                         },
                     ]);
                 }
+                // Both workstations' cycle 1 actually finished (that's why
+                // each has an "complete" row in mockOclRows above) — Motor's
+                // is still uncheck*able*, just unchecked.
+                if (table === "order_completion_log") {
+                    return chainable([
+                        { project_number: "P1", position: "10", workstation: "Hardware", cycle_index: 1 },
+                        { project_number: "P1", position: "10", workstation: "Motor", cycle_index: 1 },
+                    ]);
+                }
                 return chainable([]);
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -375,6 +395,11 @@ describe("Files Controller", () => {
                             note: null,
                             created_at: "2026-01-01T09:00:00Z",
                         },
+                    ]);
+                }
+                if (table === "order_completion_log") {
+                    return chainable([
+                        { project_number: "P1", position: "10", workstation: "Hardware", cycle_index: 1 },
                     ]);
                 }
                 return chainable([]);
@@ -498,14 +523,18 @@ describe("Files Controller", () => {
                 if (table === "order_completion_log") {
                     // Real P2L cycle data says this position has 3 cycles —
                     // takes priority over order_preparation_log/ptl_prep_queue.
-                    return chainable([
-                        {
+                    // All 3 cycles have actually finished (one row each), so
+                    // all 3 are checkable, not just however many have a
+                    // check on record.
+                    return chainable(
+                        [1, 2, 3].map((cycle_index) => ({
                             project_number: "P1",
                             position: "10",
                             workstation: "Hardware",
+                            cycle_index,
                             max_total_cycles: 3,
-                        },
-                    ]);
+                        })),
+                    );
                 }
                 if (table === "order_preparation_log") {
                     return chainable([
@@ -591,6 +620,14 @@ describe("Files Controller", () => {
                         },
                     ]);
                 }
+                // Only P1's cycle 1 has actually finished — P2's hasn't
+                // (still "not checked at all" below, just for a different
+                // reason: nothing to check yet rather than an unchecked box).
+                if (table === "order_completion_log") {
+                    return chainable([
+                        { project_number: "P1", position: "10", workstation: "Hardware", cycle_index: 1 },
+                    ]);
+                }
                 return chainable([]);
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -641,6 +678,11 @@ describe("Files Controller", () => {
                         },
                     ]);
                 }
+                if (table === "order_completion_log") {
+                    return chainable([
+                        { project_number: "P1", position: "10", workstation: "Hardware", cycle_index: 1 },
+                    ]);
+                }
                 return chainable([]);
             });
             (getDb as jest.Mock).mockResolvedValue(db);
@@ -655,6 +697,48 @@ describe("Files Controller", () => {
                 checked: false,
                 checked_cycles: 0,
                 unchecked_cycles: [1],
+            });
+        });
+
+        it("only offers cycles that have actually finished as checkable, not every cycle up to total_cycles", async () => {
+            mockRequest = { query: {} };
+
+            const mockOclRows = [
+                { project_number: "P1", position: "10", workstation: "Hardware", latest_status: null },
+            ];
+
+            const db = jest.fn((table: string) => {
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "revisions") return chainable([]);
+                // The order has 4 doors total, but only doors 1 and 2 have
+                // actually finished at the workstation so far.
+                if (table === "order_completion_log") {
+                    return chainable(
+                        [1, 2].map((cycle_index) => ({
+                            project_number: "P1",
+                            position: "10",
+                            workstation: "Hardware",
+                            cycle_index,
+                            max_total_cycles: 4,
+                        })),
+                    );
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(
+                mockRequest as Request,
+                mockResponse as Response,
+            );
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items[0]).toMatchObject({
+                total_cycles: 4,
+                checked_cycles: 0,
+                // Cycles 3 and 4 haven't finished yet — they must not show
+                // up as needing a check.
+                unchecked_cycles: [1, 2],
             });
         });
     });

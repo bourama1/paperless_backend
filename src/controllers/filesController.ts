@@ -19,6 +19,13 @@ import { resolvePbomTypeForWorkplace } from "../config/documentTypes";
  * A cycle counts as checked once it has at least one "ok" row in
  * order_cycle_checks; an "issue" row doesn't count until it's re-checked
  * "ok". checked=true only once every cycle 1..total_cycles has been OK'd.
+ *
+ * The `cycles`/`uncheckedCycles` lists only ever include cycles that have
+ * actually reached the kiosk (order_completion_log has a row for that
+ * cycle_index) — a cycle within 1..total_cycles that hasn't finished
+ * production yet isn't offered as checkable. total_cycles itself still
+ * reports the order's real eventual total (unaffected), so progress
+ * displays like "1/4 checked" keep meaning what they say.
  */
 interface CycleCheckDetail {
     cycleIndex: number;
@@ -92,12 +99,21 @@ async function getCheckStatusForPositions(
     const posPairs = Array.from(workstationsByPosKey.keys()).map((k) => k.split("||"));
     const completionTriples = positions.map((p) => [p.project_number, p.position, p.workstation]);
 
-    const [completionRows, prepRows, planRows, checkRows] = await Promise.all([
+    const [completionRows, finishedCycleRows, prepRows, planRows, checkRows] = await Promise.all([
         db("order_completion_log")
             .select("project_number", "position", "workstation")
             .max("total_cycles as max_total_cycles")
             .whereIn(["project_number", "position", "workstation"], completionTriples)
             .groupBy("project_number", "position", "workstation"),
+        // Which specific cycle_index values actually reached the kiosk
+        // (order_completion_log has a row for them) — a cycle is only
+        // checkable once it's actually finished, not just because it's
+        // within 1..totalCycles. Deduped into a Set in JS below rather
+        // than DISTINCT in SQL, matching the pattern the checkRows
+        // reduction already uses.
+        db("order_completion_log")
+            .select("project_number", "position", "workstation", "cycle_index")
+            .whereIn(["project_number", "position", "workstation"], completionTriples),
         db("order_preparation_log")
             .select("project_number", "position")
             .max("total_cycles as max_total_cycles")
@@ -123,6 +139,16 @@ async function getCheckStatusForPositions(
             key(r.project_number, r.position, r.workstation),
             Number(r.max_total_cycles) || 1,
         );
+    }
+    const finishedCyclesByKey = new Map<string, Set<number>>();
+    for (const r of finishedCycleRows as any[]) {
+        const k = key(r.project_number, r.position, r.workstation);
+        let set = finishedCyclesByKey.get(k);
+        if (!set) {
+            set = new Set<number>();
+            finishedCyclesByKey.set(k, set);
+        }
+        set.add(r.cycle_index ?? 1);
     }
     for (const r of prepRows as any[]) {
         const pk = posKey(r.project_number, r.position);
@@ -168,18 +194,28 @@ async function getCheckStatusForPositions(
         const totalCycles = totalByKey.get(k) ?? 1;
         const byCycle = latestByKeyCycle.get(k);
 
-        const cycles: CycleCheckDetail[] = [];
-        for (let cycleIndex = 1; cycleIndex <= totalCycles; cycleIndex++) {
+        // Only cycles that actually reached the kiosk (order_completion_log)
+        // are checkable — a cycle within 1..totalCycles that hasn't
+        // finished production yet doesn't exist to check. Falls back to
+        // just cycle 1 when nothing has finished at all (a prep/plan-only
+        // total with zero completions), so a not-yet-produced order never
+        // offers cycle 1 as "checked: false, needs checking" incorrectly —
+        // it simply isn't in the list.
+        const finishedCycleIndexes = Array.from(finishedCyclesByKey.get(k) ?? []).sort(
+            (a, b) => a - b,
+        );
+
+        const cycles: CycleCheckDetail[] = finishedCycleIndexes.map((cycleIndex) => {
             const row = byCycle?.get(cycleIndex);
-            cycles.push({
+            return {
                 cycleIndex,
                 checked: row?.status === "ok",
                 status: row?.status ?? null,
                 employeeName: row?.employee_name ?? null,
                 note: row?.note ?? null,
                 checkedAt: row?.created_at ?? null,
-            });
-        }
+            };
+        });
 
         const checkedCycles = cycles.filter((c) => c.checked).length;
         const uncheckedCycles = cycles
