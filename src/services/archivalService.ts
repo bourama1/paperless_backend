@@ -253,7 +253,10 @@ async function appendCycleInfoPage(pdfBytes: Buffer, rows: CycleInfoRow[]): Prom
 
     const col = (s: string, w: number) => s.padEnd(w).slice(0, w);
     const headerLine =
-        col("Cycle", 8) + col("Prepared by", 24) + col("Completed by (PTL)", 24) + col("Checked by", 24);
+        col("Cyklus", 8) +
+        col("Šrouby vychystal/a", 24) +
+        col("Hardware vychystal/a", 24) +
+        col("Zkontroloval/a", 24);
 
     const rowsPerPage = Math.floor((PAGE_HEIGHT - MARGIN * 2 - (TITLE_SIZE + 14) - LINE_HEIGHT) / LINE_HEIGHT);
 
@@ -263,7 +266,7 @@ async function appendCycleInfoPage(pdfBytes: Buffer, rows: CycleInfoRow[]): Prom
         let y = PAGE_HEIGHT - MARGIN;
 
         if (i === 0) {
-            page.drawText("Production record", { x: MARGIN, y, size: TITLE_SIZE, font: boldFont });
+            page.drawText("Výrobní záznam", { x: MARGIN, y, size: TITLE_SIZE, font: boldFont });
             y -= TITLE_SIZE + 14;
         }
 
