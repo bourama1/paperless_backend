@@ -1771,10 +1771,16 @@ export async function handleQrSticker(
     update: OrderUpdate,
     labelRows: LabelRow[],
 ): Promise<void> {
-    const { order, cycleIndex, totalCycles } = update;
+    const { order } = update;
 
-    // Only on the last cycle (VBA: Right(nactenyKodCely, 1) = 0 → last scan of position)
-    if (cycleIndex !== totalCycles) return;
+    // QR stickers are a Hardware-only thing, never Motor.
+    if (normalizeWorkplace(order.workplace) !== "hardware") return;
+
+    // One QR sticker per cycle (door) — handleLabelPrinting already calls
+    // this exactly once per cycle event, so printing a single copy here
+    // (instead of doorCount copies gated to the last cycle) means each
+    // door gets its own QR as it's actually being worked, matching the
+    // barcode labels' own per-door pacing.
 
     // Find the TMP*.TXT filename from the CSV rows (col 13, any row that has it)
     const tmpFile = labelRows.find((r) =>
@@ -1809,7 +1815,7 @@ export async function handleQrSticker(
 
     if (!QR_IMAGES_PATH) {
         console.log(
-            `[QR] [DRY RUN] Would print ${data.doorCount}x ${qrName}.png (rail: ${data.railType})`,
+            `[QR] [DRY RUN] Would print 1x ${qrName}.png (rail: ${data.railType}, cycle ${update.cycleIndex}/${update.totalCycles})`,
         );
         return;
     }
@@ -1821,7 +1827,7 @@ export async function handleQrSticker(
     }
 
     console.log(
-        `[QR] Printing ${data.doorCount}x ${qrName}.png for rail type "${data.railType}"`,
+        `[QR] Printing 1x ${qrName}.png for rail type "${data.railType}" (cycle ${update.cycleIndex}/${update.totalCycles})`,
     );
-    await printQrPng(pngPath, data.doorCount, order.workplace);
+    await printQrPng(pngPath, 1, order.workplace);
 }

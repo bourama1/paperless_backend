@@ -295,13 +295,36 @@ describe("Label Printing Service", () => {
     });
 
     describe("handleQrSticker", () => {
-        it("should skip if not the last cycle", async () => {
+        it("no longer skips mid-cycle updates — prints one QR per cycle, not doorCount copies on the last cycle only", async () => {
             const midCycleUpdate = {
                 ...mockOrderUpdate,
                 cycleIndex: 2,
                 totalCycles: 4,
             };
-            await handleQrSticker(midCycleUpdate, []);
+            const tmpContent = [
+                "pozice|01",
+                "x|06210610|x|SL",
+                "Objedn\xe1no|4", // door count — must NOT end up in the print count anymore
+                "x|x|Cenov\xe1 skupina|B01",
+            ].join("\n");
+            (fs.readFileSync as jest.Mock).mockImplementation((p: string) => {
+                if (p.includes("country-codes.json")) return sampleCountryCodes;
+                if (p.includes("TMP123.TXT")) return tmpContent;
+                return sampleCsvContent;
+            });
+            const labelRows = [{ tmpFile: "TMP123.TXT" } as any];
+            const logSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+
+            await handleQrSticker(midCycleUpdate, labelRows);
+
+            // QR_IMAGES_PATH is unset in tests, so this hits the dry-run
+            // log — enough to prove a mid-cycle update reaches all the way
+            // through (not skipped for being non-last), and that exactly
+            // 1 copy prints regardless of the TMP file's doorCount=4.
+            expect(logSpy).toHaveBeenCalledWith(
+                expect.stringContaining("Would print 1x Indy_SL.png"),
+            );
+            logSpy.mockRestore();
         });
 
         it("should skip if no TMP file reference in CSV rows", async () => {
@@ -314,6 +337,22 @@ describe("Label Printing Service", () => {
             const labelRows = [{ tmpFile: "TMP123.TXT" } as any];
 
             await handleQrSticker(mockOrderUpdate, labelRows);
+
+            expect(fs.existsSync).toHaveBeenCalledWith(
+                expect.stringContaining("TMP123.TXT"),
+            );
+        });
+
+        it("should skip for Motor — QR stickers are Hardware-only", async () => {
+            const motorUpdate = {
+                ...mockOrderUpdate,
+                order: { ...mockOrderUpdate.order, workplace: "Motor" },
+            };
+            const labelRows = [{ tmpFile: "TMP123.TXT" } as any];
+
+            await handleQrSticker(motorUpdate, labelRows);
+
+            expect(fs.existsSync).not.toHaveBeenCalled();
         });
     });
 
