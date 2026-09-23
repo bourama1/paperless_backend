@@ -655,4 +655,17 @@ const setupDatabase = async (targetDb: Knex) => {
             table.timestamp("created_at").defaultTo(targetDb.fn.now());
         });
     }
+
+    // 25. prep_baan_codes — which BAAN codes (item IDs) the prep checklist
+    // shows, out of an order's non-PTL items (not every non-PTL item needs
+    // a person to prepare it, e.g. RAL colour codes). Managed from the
+    // hidden admin screen. Empty table = no filtering. Stored upper-case.
+    if (!(await targetDb.schema.hasTable("prep_baan_codes"))) {
+        await targetDb.schema.createTable("prep_baan_codes", (table) => {
+            table.increments("id").primary();
+            table.string("code").notNullable().unique();
+            table.string("description");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
 };

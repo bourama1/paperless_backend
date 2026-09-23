@@ -18,6 +18,7 @@ import {
     getNonPtlItemsForOrder,
     recordPrepItemChecked,
     recordPrepItemUnchecked,
+    addPrepBaanCodes,
 } from "../../services/ptlPlanService";
 import { getDb, getMasterplanDb } from "../../config/database";
 import fs from "fs";
@@ -287,9 +288,13 @@ describe("getNonPtlItemsForOrder", () => {
     afterEach(() => jest.clearAllMocks());
 
     /** db("ptl_prep_queue").where(...).select(...).first() -> queueRow
-     *  db("order_prep_item_log").select(...).where(...) -> checkedRows */
-    function makeDb(queueRow: any, checkedRows: { item_id: string }[]) {
+     *  db("order_prep_item_log").select(...).where(...) -> checkedRows
+     *  db("prep_baan_codes").select(...) -> baanCodes (empty = no filter) */
+    function makeDb(queueRow: any, checkedRows: { item_id: string }[], baanCodes: string[] = []) {
         return jest.fn((table: string) => {
+            if (table === "prep_baan_codes") {
+                return { select: jest.fn().mockResolvedValue(baanCodes.map((code) => ({ code }))) };
+            }
             if (table === "ptl_prep_queue") {
                 const chain: any = {};
                 chain.where = jest.fn(() => chain);
@@ -369,6 +374,59 @@ describe("getNonPtlItemsForOrder", () => {
         const result = await getNonPtlItemsForOrder("PN1", "01");
 
         expect(result).toEqual({ items: [], allPrepared: true });
+    });
+
+    describe("with a prep BAAN code list", () => {
+        it("shows only the non-PTL items whose BAAN code is on the list", async () => {
+            (getDb as jest.Mock).mockResolvedValue(
+                makeDb({ non_ptl_items: JSON.stringify(ITEMS) }, [], ["X2"]),
+            );
+
+            const result = await getNonPtlItemsForOrder("PN1", "01");
+
+            expect(result.items.map((i) => i.itemID)).toEqual(["X2"]);
+        });
+
+        it("matches regardless of case/whitespace in the order file", async () => {
+            const items = [{ ...ITEMS[0], itemID: " x1 " }];
+            (getDb as jest.Mock).mockResolvedValue(makeDb({ non_ptl_items: JSON.stringify(items) }, [], ["X1"]));
+
+            const result = await getNonPtlItemsForOrder("PN1", "01");
+
+            expect(result.items).toHaveLength(1);
+        });
+
+        it("an order with none of its items on the list needs no prep (print not blocked)", async () => {
+            (getDb as jest.Mock).mockResolvedValue(
+                makeDb({ non_ptl_items: JSON.stringify(ITEMS) }, [], ["T09-040-70-0054"]),
+            );
+
+            const result = await getNonPtlItemsForOrder("PN1", "01");
+
+            expect(result).toEqual({ items: [], allPrepared: true });
+        });
+    });
+});
+
+describe("addPrepBaanCodes", () => {
+    it("accepts a pasted block, normalizes and de-duplicates, and skips codes already listed", async () => {
+        const ignore = jest.fn().mockResolvedValue([{ id: 1 }, { id: 2 }]);
+        const onConflict = jest.fn(() => ({ ignore: () => ({ returning: ignore }) }));
+        const insert = jest.fn(() => ({ onConflict }));
+        (getDb as jest.Mock).mockResolvedValue(jest.fn(() => ({ insert })));
+
+        const added = await addPrepBaanCodes(" t09-040-70-0054\r\nT09-040-70-0056, t09-040-70-0054 ;", "šrouby");
+
+        expect(insert).toHaveBeenCalledWith([
+            { code: "T09-040-70-0054", description: "šrouby" },
+            { code: "T09-040-70-0056", description: "šrouby" },
+        ]);
+        expect(onConflict).toHaveBeenCalledWith("code");
+        expect(added).toBe(2);
+    });
+
+    it("does nothing for blank input", async () => {
+        expect(await addPrepBaanCodes("  \n , ")).toBe(0);
     });
 });
 

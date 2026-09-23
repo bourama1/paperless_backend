@@ -482,6 +482,57 @@ export async function getPrepQueueHardwareTypes(): Promise<string[]> {
 // the ones nobody in PTL/P2L will prepare automatically — a person has to
 // tap through each one by hand before the prep label can be printed.
 
+// ── which BAAN codes belong on the prep checklist ──
+// Not every non-PTL item needs a person to prepare it (e.g. RAL colour
+// codes). prep_baan_codes lists the BAAN codes (itemID) that DO — managed
+// from the hidden admin screen, read on every checklist request, so a
+// change applies to orders already in the queue straight away. An empty
+// list = no filtering (every non-PTL item is shown), so a list nobody has
+// set up yet never hides the whole checklist.
+
+export interface PrepBaanCode {
+    id: number;
+    code: string;
+    description: string | null;
+}
+
+export const normalizeBaanCode = (code: string) => code.trim().toUpperCase();
+
+export async function listPrepBaanCodes(): Promise<PrepBaanCode[]> {
+    const db = await getDb();
+    return db("prep_baan_codes").select("id", "code", "description").orderBy("code", "asc");
+}
+
+/**
+ * Adds one or more codes — `codes` may be a whole pasted block (separated
+ * by new lines, spaces, commas or semicolons). Codes already on the list
+ * are skipped. Returns how many were actually new.
+ */
+export async function addPrepBaanCodes(codes: string, description?: string): Promise<number> {
+    const unique = Array.from(
+        new Set(codes.split(/[\s,;]+/).map(normalizeBaanCode).filter(Boolean)),
+    );
+    if (unique.length === 0) return 0;
+    const db = await getDb();
+    const inserted = await db("prep_baan_codes")
+        .insert(unique.map((code) => ({ code, description: description?.trim() || null })))
+        .onConflict("code")
+        .ignore()
+        .returning("id");
+    return inserted.length;
+}
+
+export async function deletePrepBaanCode(id: number): Promise<void> {
+    const db = await getDb();
+    await db("prep_baan_codes").where({ id }).delete();
+}
+
+/** The allowed BAAN codes, or null when the list is empty (= show all). */
+async function getPrepBaanCodeSet(db: any): Promise<Set<string> | null> {
+    const rows: { code: string }[] = await db("prep_baan_codes").select("code");
+    return rows.length > 0 ? new Set(rows.map((r) => r.code)) : null;
+}
+
 export interface PrepChecklistItem extends OrderFileItem {
     checked: boolean;
 }
@@ -524,6 +575,11 @@ export async function getNonPtlItemsForOrder(
             `[PREP] Could not parse non_ptl_items for ${projectNumber}/${position}: ${err.message}`,
         );
         return { items: [], allPrepared: true };
+    }
+
+    const allowed = await getPrepBaanCodeSet(db);
+    if (allowed) {
+        items = items.filter((item) => allowed.has(normalizeBaanCode(item.itemID)));
     }
     if (items.length === 0) {
         return { items: [], allPrepared: true };

@@ -7,6 +7,9 @@ import {
     getNonPtlItemsForOrder,
     recordPrepItemChecked,
     recordPrepItemUnchecked,
+    listPrepBaanCodes,
+    addPrepBaanCodes,
+    deletePrepBaanCode,
 } from "../services/ptlPlanService";
 
 export const listPrepQueue = async (req: Request, res: Response) => {
@@ -100,6 +103,42 @@ export const uncheckPrepItem = async (req: Request, res: Response) => {
         res.status(200).json(checklist);
     } catch (error) {
         console.error("Error recording prep item uncheck:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+// ── prep BAAN code list (under /employees/admin, behind adminPinAuth) ──
+
+export const getPrepBaanCodes = async (req: Request, res: Response) => {
+    try {
+        res.json(await listPrepBaanCodes());
+    } catch (error) {
+        console.error("Error listing prep BAAN codes:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+// `codes` may be one code or a whole pasted block — see addPrepBaanCodes.
+export const postPrepBaanCodes = async (req: Request, res: Response) => {
+    const { codes, description } = req.body ?? {};
+    if (typeof codes !== "string" || !codes.trim()) {
+        return res.status(400).json({ error: "codes is required" });
+    }
+    try {
+        const added = await addPrepBaanCodes(codes, typeof description === "string" ? description : undefined);
+        res.status(201).json({ added, codes: await listPrepBaanCodes() });
+    } catch (error) {
+        console.error("Error adding prep BAAN codes:", error);
+        res.status(500).json({ error: "Internal server error" });
+    }
+};
+
+export const removePrepBaanCode = async (req: Request, res: Response) => {
+    try {
+        await deletePrepBaanCode(Number(req.params.id));
+        res.json({ status: "ok" });
+    } catch (error) {
+        console.error("Error deleting prep BAAN code:", error);
         res.status(500).json({ error: "Internal server error" });
     }
 };

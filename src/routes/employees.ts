@@ -14,6 +14,11 @@ import {
     hideQualityEngineer,
     restoreQualityEngineer,
 } from "../controllers/qualityControlController";
+import {
+    getPrepBaanCodes,
+    postPrepBaanCodes,
+    removePrepBaanCode,
+} from "../controllers/prepQueueController";
 import { adminPinAuth } from "../middleware/apiKeyAuth";
 
 const router = Router();
@@ -39,5 +44,11 @@ router.post("/admin/quality-engineers", adminPinAuth, postQualityEngineer);
 router.put("/admin/quality-engineers/:id", adminPinAuth, putQualityEngineer);
 router.post("/admin/quality-engineers/:id/hide", adminPinAuth, hideQualityEngineer);
 router.post("/admin/quality-engineers/:id/restore", adminPinAuth, restoreQualityEngineer);
+
+// Which BAAN codes the prep checklist shows (see ptlPlanService). A plain
+// delete is fine here — it's a setting, not history anyone refers back to.
+router.get("/admin/prep-baan-codes", adminPinAuth, getPrepBaanCodes);
+router.post("/admin/prep-baan-codes", adminPinAuth, postPrepBaanCodes);
+router.delete("/admin/prep-baan-codes/:id", adminPinAuth, removePrepBaanCode);
 
 export default router;
