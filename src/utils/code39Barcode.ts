@@ -182,15 +182,23 @@ const FONT_CANDIDATES = [
 ];
 
 /**
- * Looks for the BC 3of9 Light font file: explicit env var first, then the
- * backend's config/ folder, then the standard Windows font directories.
- * Returns null when nothing is found (the caller falls back to vector bars).
+ * Looks for the BC 3of9 Light font file — see findFontFile. Returns null
+ * when nothing is found (the caller falls back to vector bars).
  */
 export function findCode39FontFile(): string | null {
+    return findFontFile(process.env.PREP_LABEL_BARCODE_FONT_PATH, FONT_CANDIDATES);
+}
+
+/**
+ * Looks for a font file: the explicit path (usually an env var) first, then
+ * each of `names` in the backend's config/ folder, then in the standard
+ * Windows font directories. Returns null when nothing is found.
+ */
+export function findFontFile(explicitPath: string | undefined, names: string[]): string | null {
     const candidates: string[] = [];
 
-    if (process.env.PREP_LABEL_BARCODE_FONT_PATH) {
-        candidates.push(process.env.PREP_LABEL_BARCODE_FONT_PATH);
+    if (explicitPath) {
+        candidates.push(explicitPath);
     }
 
     // When packaged as a standalone .exe (pkg), __dirname isn't dist/ —
@@ -198,7 +206,7 @@ export function findCode39FontFile(): string | null {
     const cfgDir = (process as any).pkg
         ? path.join(path.dirname(process.execPath), "config")
         : path.join(__dirname, "../../config");
-    for (const name of FONT_CANDIDATES) {
+    for (const name of names) {
         candidates.push(path.join(cfgDir, name));
     }
 
@@ -207,7 +215,7 @@ export function findCode39FontFile(): string | null {
         "C:\\Windows\\Fonts",
     ].filter(Boolean) as string[];
     for (const dir of windowsFonts) {
-        for (const name of FONT_CANDIDATES) {
+        for (const name of names) {
             candidates.push(path.join(dir, name));
         }
     }

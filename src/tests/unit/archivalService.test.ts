@@ -20,12 +20,12 @@ jest.mock("fs", () => {
     };
 });
 
-import { runArchivalSweep } from "../../services/archivalService";
+import { runArchivalSweep, toFontSafeText } from "../../services/archivalService";
 import { getDb } from "../../config/database";
 import axios from "axios";
 import fs from "fs";
 import { convertToPdfA } from "../../services/pdfaService";
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, StandardFonts } from "pdf-lib";
 
 function thenable<T>(value: T) {
     return { then: (resolve: (v: T) => void) => resolve(value) };
@@ -349,5 +349,20 @@ describe("archivalService", () => {
         expect(updateFn).not.toHaveBeenCalledWith(
             expect.objectContaining({ archived_at: expect.anything() }),
         );
+    });
+});
+
+describe("toFontSafeText", () => {
+    it("keeps what Courier can draw and falls back to the base letter for the rest", async () => {
+        const doc = await PDFDocument.create();
+        const font = await doc.embedFont(StandardFonts.Courier);
+        const supported = new Set(font.getCharacterSet());
+
+        // Š, á, é, í are WinAnsi; ř, č, ě aren't.
+        const safe = toFontSafeText("Šťastná Dvořáková Černý", supported);
+
+        expect(safe).toBe("Šťastná Dvořáková Černý".replace("ť", "t").replace("ř", "r").replace("Č", "C"));
+        // Must not throw once drawn.
+        expect(() => font.encodeText(safe)).not.toThrow();
     });
 });

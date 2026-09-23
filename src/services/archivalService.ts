@@ -3,7 +3,9 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import crypto from "crypto";
-import { PDFDocument, StandardFonts } from "pdf-lib";
+import { PDFDocument, PDFFont, StandardFonts } from "pdf-lib";
+import fontkit from "@pdf-lib/fontkit";
+import { findFontFile } from "../utils/code39Barcode";
 import { getDb } from "../config/database";
 import { DOC_MANAGER_URL } from "./workstationService";
 import {
@@ -151,11 +153,16 @@ function archivePositionFor(documentType: number, position: string): string {
     return Number.isNaN(n) ? position : String(n + 1);
 }
 
+const QC_ISSUE_MARK = "(!)";
+
 interface CycleInfoRow {
     cycleIndex: number;
     preparedBy: string | null;
     completedBy: string | null;
     checkedBy: string | null;
+    // The quality engineer's sign-off (order_qc_checks), for orders whose
+    // TMP file asked for one — "-" in the table otherwise.
+    qcBy: string | null;
 }
 
 /**
@@ -182,12 +189,14 @@ async function getCycleInfoForOrder(
 ): Promise<CycleInfoRow[]> {
     const db = await getDb();
 
-    const completionRows: { cycle_index: number; employee_name: string }[] = await db(
+    const completionRows: { cycle_index: number; employee_name: string; workstation: string }[] = await db(
         "order_completion_log",
     )
         .where({ order_id: orderId })
         .orderBy("created_at", "desc")
-        .select("cycle_index", "employee_name");
+        .select("cycle_index", "employee_name", "workstation");
+    // One order_id = one workplace's pass (Hardware or Motor).
+    const workstation = completionRows[0]?.workstation;
 
     const completedByCycle = new Map<number, string>();
     for (const r of completionRows) {
@@ -199,7 +208,7 @@ async function getCycleInfoForOrder(
     const cycleIndexes = Array.from(completedByCycle.keys()).sort((a, b) => a - b);
     if (cycleIndexes.length === 0) return [];
 
-    const [prepRows, checkRows] = await Promise.all([
+    const [prepRows, checkRows, qcRows] = await Promise.all([
         db("order_preparation_log")
             .where({ project_number: projectNumber, position })
             .whereIn("cycle_index", cycleIndexes)
@@ -210,6 +219,15 @@ async function getCycleInfoForOrder(
             .whereIn("cycle_index", cycleIndexes)
             .orderBy("created_at", "desc")
             .select("cycle_index", "employee_name"),
+        // QC sign-offs always carry a workstation, so this one can be
+        // scoped to this order's own pass.
+        workstation
+            ? db("order_qc_checks")
+                  .where({ project_number: projectNumber, position, workstation })
+                  .whereIn("cycle_index", cycleIndexes)
+                  .orderBy("created_at", "desc")
+                  .select("cycle_index", "engineer_name", "status")
+            : Promise.resolve([]),
     ]);
 
     const preparedByCycle = new Map<number, string>();
@@ -221,11 +239,22 @@ async function getCycleInfoForOrder(
         if (!checkedByCycle.has(r.cycle_index)) checkedByCycle.set(r.cycle_index, r.employee_name);
     }
 
+    // Latest QC row per cycle; a standing "issue" is marked up front (see
+    // QC_ISSUE_MARK) so the archive never reads as if a failed QC had
+    // passed — a marker at the end could be cut off with a long name.
+    const qcByCycle = new Map<number, string>();
+    for (const r of (qcRows ?? []) as { cycle_index: number; engineer_name: string; status: string }[]) {
+        if (!qcByCycle.has(r.cycle_index)) {
+            qcByCycle.set(r.cycle_index, r.status === "ok" ? r.engineer_name : `${QC_ISSUE_MARK} ${r.engineer_name}`);
+        }
+    }
+
     return cycleIndexes.map((cycleIndex) => ({
         cycleIndex,
         preparedBy: preparedByCycle.get(cycleIndex) ?? null,
         completedBy: completedByCycle.get(cycleIndex) ?? null,
         checkedBy: checkedByCycle.get(cycleIndex) ?? null,
+        qcBy: qcByCycle.get(cycleIndex) ?? null,
     }));
 }
 
@@ -234,7 +263,75 @@ const PAGE_HEIGHT = 841.89;
 const MARGIN = 40;
 const LINE_HEIGHT = 16;
 const TITLE_SIZE = 14;
-const BODY_SIZE = 10;
+// Courier is 0.6em per character: 95 table characters at 9pt = 513pt, just
+// inside the 515pt between the margins.
+const BODY_SIZE = 9;
+const CYCLE_COL = 7;
+const NAME_COL = 22;
+
+// ── fonts ──
+// The record page embeds Courier New (monospace, same 0.6em width as
+// Courier, so the column layout is identical) for full Czech support —
+// the PDF's built-in Courier only has WinAnsi glyphs, which lack
+// č/ř/ď/ť/ň. Found via ARCHIVE_FONT_PATH / ARCHIVE_FONT_BOLD_PATH, then
+// config/, then C:\Windows\Fonts (always there on the Windows server).
+// Read once and cached; null = not found, use the built-in Courier.
+let archiveFontBytes: { regular: Buffer; bold: Buffer } | null | undefined;
+
+function loadArchiveFontBytes(): { regular: Buffer; bold: Buffer } | null {
+    if (archiveFontBytes !== undefined) return archiveFontBytes;
+    const regular = findFontFile(process.env.ARCHIVE_FONT_PATH, ["cour.ttf"]);
+    const bold = findFontFile(process.env.ARCHIVE_FONT_BOLD_PATH, ["courbd.ttf"]) ?? regular;
+    try {
+        archiveFontBytes =
+            regular && bold ? { regular: fs.readFileSync(regular), bold: fs.readFileSync(bold) } : null;
+    } catch (err: any) {
+        console.warn(`[ARCHIVE] Could not read Courier New (${err.message})`);
+        archiveFontBytes = null;
+    }
+    if (!archiveFontBytes) {
+        console.warn(
+            "[ARCHIVE] Courier New not found — record page falls back to the built-in Courier (no č/ř/ď/ť/ň). " +
+                "Set ARCHIVE_FONT_PATH to a .ttf with Czech glyphs to fix.",
+        );
+    }
+    return archiveFontBytes;
+}
+
+async function embedArchiveFonts(pdfDoc: PDFDocument): Promise<{ font: PDFFont; boldFont: PDFFont }> {
+    const bytes = loadArchiveFontBytes();
+    if (bytes) {
+        pdfDoc.registerFontkit(fontkit);
+        return {
+            // subset: only the glyphs actually used get embedded
+            font: await pdfDoc.embedFont(bytes.regular, { subset: true }),
+            boldFont: await pdfDoc.embedFont(bytes.bold, { subset: true }),
+        };
+    }
+    return {
+        font: await pdfDoc.embedFont(StandardFonts.Courier),
+        boldFont: await pdfDoc.embedFont(StandardFonts.CourierBold),
+    };
+}
+
+/**
+ * Safety net for characters the embedded font can't draw (all of Czech is
+ * covered by Courier New; this matters for the built-in-Courier fallback,
+ * where č/ř/ď/ť/ň would make pdf-lib throw and drop the whole record page
+ * from the archive). Such a character falls back to its base letter (ř → r).
+ */
+export function toFontSafeText(text: string, supported: Set<number>): string {
+    let out = "";
+    for (const ch of text) {
+        if (supported.has(ch.codePointAt(0)!)) {
+            out += ch;
+            continue;
+        }
+        const base = ch.normalize("NFD")[0] ?? "";
+        out += supported.has(base.codePointAt(0) ?? -1) ? base : "?";
+    }
+    return out;
+}
 
 /**
  * Appends one or more pages listing who prepared/ran/checked each cycle
@@ -244,26 +341,34 @@ const BODY_SIZE = 10;
  * plenty readable for a plain production record, and far less code.
  * Returns the ORIGINAL bytes unchanged if there's nothing to add.
  */
-async function appendCycleInfoPage(pdfBytes: Buffer, rows: CycleInfoRow[]): Promise<Buffer> {
+export async function appendCycleInfoPage(pdfBytes: Buffer, rows: CycleInfoRow[]): Promise<Buffer> {
     if (rows.length === 0) return pdfBytes;
 
     const pdfDoc = await PDFDocument.load(pdfBytes);
-    const font = await pdfDoc.embedFont(StandardFonts.Courier);
-    const boldFont = await pdfDoc.embedFont(StandardFonts.CourierBold);
+    const { font, boldFont } = await embedArchiveFonts(pdfDoc);
 
-    const col = (s: string, w: number) => s.padEnd(w).slice(0, w);
+    const supported = new Set(font.getCharacterSet());
+    // Always leaves at least one space before the next column, even when a
+    // name has to be cut short.
+    const col = (s: string, w: number) => toFontSafeText(s, supported).slice(0, w - 1).padEnd(w);
     const headerLine =
-        col("Cyklus", 8) +
-        col("Šrouby vychystal/a", 24) +
-        col("Hardware vychystal/a", 24) +
-        col("Zkontroloval/a", 24);
+        col("Cyklus", CYCLE_COL) +
+        col("Šrouby vychystal/a", NAME_COL) +
+        col("Hardware vychystal/a", NAME_COL) +
+        col("Zkontroloval/a", NAME_COL) +
+        col("Kontrola kvality", NAME_COL);
 
-    const rowsPerPage = Math.floor((PAGE_HEIGHT - MARGIN * 2 - (TITLE_SIZE + 14) - LINE_HEIGHT) / LINE_HEIGHT);
+    // One line kept free at the bottom for the QC legend below.
+    const rowsPerPage = Math.floor((PAGE_HEIGHT - MARGIN * 2 - (TITLE_SIZE + 14) - 2 * LINE_HEIGHT) / LINE_HEIGHT);
 
+    let page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+    let y = PAGE_HEIGHT - MARGIN;
     for (let i = 0; i < rows.length; i += rowsPerPage) {
         const chunk = rows.slice(i, i + rowsPerPage);
-        const page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
-        let y = PAGE_HEIGHT - MARGIN;
+        if (i > 0) {
+            page = pdfDoc.addPage([PAGE_WIDTH, PAGE_HEIGHT]);
+            y = PAGE_HEIGHT - MARGIN;
+        }
 
         if (i === 0) {
             page.drawText("Výrobní záznam", { x: MARGIN, y, size: TITLE_SIZE, font: boldFont });
@@ -275,13 +380,23 @@ async function appendCycleInfoPage(pdfBytes: Buffer, rows: CycleInfoRow[]): Prom
 
         for (const row of chunk) {
             const line =
-                col(String(row.cycleIndex), 8) +
-                col(row.preparedBy ?? "-", 24) +
-                col(row.completedBy ?? "-", 24) +
-                col(row.checkedBy ?? "-", 24);
+                col(String(row.cycleIndex), CYCLE_COL) +
+                col(row.preparedBy ?? "-", NAME_COL) +
+                col(row.completedBy ?? "-", NAME_COL) +
+                col(row.checkedBy ?? "-", NAME_COL) +
+                col(row.qcBy ?? "-", NAME_COL);
             page.drawText(line, { x: MARGIN, y, size: BODY_SIZE, font });
             y -= LINE_HEIGHT;
         }
+    }
+
+    if (rows.some((r) => r.qcBy?.startsWith(QC_ISSUE_MARK))) {
+        page.drawText(toFontSafeText(`${QC_ISSUE_MARK} = kontrola kvality zjistila problém`, supported), {
+            x: MARGIN,
+            y: y - 4,
+            size: BODY_SIZE,
+            font,
+        });
     }
 
     return Buffer.from(await pdfDoc.save());
