@@ -473,7 +473,12 @@ export function readCsvFile(salesOrder: string, position: string): LabelRow[] {
     const csvPath = buildCsvPath(salesOrder, position);
     if (!fs.existsSync(csvPath)) throw new Error(`CSV not found: ${csvPath}`);
 
-    const raw = fs.readFileSync(csvPath, "latin1"); // CP1250, latin1 preserves bytes
+    const rows = parseCsvRows(fs.readFileSync(csvPath, "latin1")); // CP1250, latin1 preserves bytes
+    console.log(`[LABELS] Read ${rows.length} rows from ${csvPath}`);
+    return rows;
+}
+
+export function parseCsvRows(raw: string): LabelRow[] {
     const rows: LabelRow[] = [];
 
     for (const line of raw.split("\n")) {
@@ -506,7 +511,6 @@ export function readCsvFile(salesOrder: string, position: string): LabelRow[] {
         });
     }
 
-    console.log(`[LABELS] Read ${rows.length} rows from ${csvPath}`);
     return rows;
 }
 
@@ -1634,11 +1638,15 @@ const QR_CODE_MAP: Record<string, string> = {
  *   col B = "06210610"  → col D = rail type (TypVedeni)
  *   col A = "Objednáno" → col B = door count (PocetVrat)
  *   col C = "Cenová skupina" → col D = price group (CenovaSkupina)
+ *   col B = "00000040"  → col D = "j"/"n" — special technical requirements,
+ *                         i.e. this position needs a quality-control check
  */
 interface TmpFileData {
     railType: string;
     doorCount: number;
     priceGroup: string;
+    // null when the position's section has no 00000040 characteristic at all
+    qcRequired: boolean | null;
 }
 
 function parseTmpFile(filePath: string, position: string): TmpFileData | null {
@@ -1647,7 +1655,17 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
         return null;
     }
 
-    const raw = fs.readFileSync(filePath, "latin1");
+    const data = parseTmpContent(fs.readFileSync(filePath, "latin1"), position);
+    if (!data.railType) {
+        console.warn(
+            `[QR] Could not find rail type (06210610) in ${filePath} for position ${position}`,
+        );
+        return null;
+    }
+    return data;
+}
+
+export function parseTmpContent(raw: string, position: string): TmpFileData {
     const lines = raw
         .split("\n")
         .map((l) => l.trim())
@@ -1659,6 +1677,7 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
     let railType = "";
     let doorCount = 0;
     let priceGroup = "";
+    let qcRequired: boolean | null = null;
 
     for (const line of lines) {
         const cols = line.split("|").map((c) => c.trim());
@@ -1685,16 +1704,40 @@ function parseTmpFile(filePath: string, position: string): TmpFileData | null {
         if (cols[2]?.includes("Cenová skupina") && cols[3]) {
             priceGroup = cols[3].trim();
         }
+
+        // QC required: col B = "00000040" → col D = "j" (ano) / "n" (ne)
+        if (cols[1] === "00000040" && cols[3]) {
+            qcRequired = cols[3].trim().toLowerCase() === "j";
+        }
     }
 
-    if (!railType) {
-        console.warn(
-            `[QR] Could not find rail type (06210610) in ${filePath} for position ${position}`,
-        );
+    return { railType, doorCount, priceGroup, qcRequired };
+}
+
+/**
+ * Whether a sales order's position needs a quality-control check, per the
+ * TMP file's 00000040 characteristic. Resolved the same way the QR sticker
+ * finds its TMP file: the position's label CSV names it (see
+ * handleQrSticker). null when it can't be determined — no CSV, no TMP
+ * reference, file missing, or no 00000040 line for that position.
+ * Async reads — these files live on a network share and the caller (the
+ * Docs overview) must not block the event loop on them.
+ */
+export async function lookupQcRequired(
+    salesOrder: string,
+    position: string,
+): Promise<boolean | null> {
+    try {
+        const csv = await fs.promises.readFile(buildCsvPath(salesOrder, position), "latin1");
+        const tmpFile = parseCsvRows(csv).find((r) =>
+            r.tmpFile?.toLowerCase().startsWith("tmp"),
+        )?.tmpFile;
+        if (!tmpFile) return null;
+        const tmp = await fs.promises.readFile(path.join(TMP_FILES_PATH, tmpFile), "latin1");
+        return parseTmpContent(tmp, position).qcRequired;
+    } catch {
         return null;
     }
-
-    return { railType, doorCount, priceGroup };
 }
 
 /**

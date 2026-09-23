@@ -604,4 +604,55 @@ const setupDatabase = async (targetDb: Knex) => {
             table.boolean("active").notNullable().defaultTo(true);
         });
     }
+
+    // 23. order_qc_requirement table — whether a project/position needs a
+    // quality-control check, read once from its TMP file's 00000040
+    // characteristic (see labelPrintingService.lookupQcRequired) and cached
+    // here, so the Docs overview (polled every 10s) never re-reads the
+    // network share for an order it's already resolved. Only determined
+    // answers are stored; an unresolvable one is retried later (see
+    // qcRequirementService).
+    if (!(await targetDb.schema.hasTable("order_qc_requirement"))) {
+        await targetDb.schema.createTable("order_qc_requirement", (table) => {
+            table.increments("id").primary();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.boolean("qc_required").notNullable();
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+            table.unique(["project_number", "position"]);
+        });
+    }
+
+    // 24. quality_engineers + order_qc_checks — the quality-control sign-off
+    // for orders flagged by their TMP file (see order_qc_requirement). Done
+    // by quality engineers, who are separate people from the employees
+    // table and identify themselves with a personal PIN (stored only as a
+    // salted scrypt hash — see qualityControlService). Per cycle, like the
+    // standard check (order_cycle_checks), but a separate, independent
+    // record: an order can need both. engineer_name is copied onto each row
+    // so history still reads correctly after an engineer is renamed/hidden.
+    if (!(await targetDb.schema.hasTable("quality_engineers"))) {
+        await targetDb.schema.createTable("quality_engineers", (table) => {
+            table.increments("id").primary();
+            table.string("name").notNullable().unique();
+            table.string("pin_hash").notNullable();
+            table.boolean("active").notNullable().defaultTo(true);
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
+    if (!(await targetDb.schema.hasTable("order_qc_checks"))) {
+        await targetDb.schema.createTable("order_qc_checks", (table) => {
+            table.increments("id").primary();
+            table.string("project_number").notNullable();
+            table.string("position").notNullable();
+            table.string("workstation").notNullable();
+            table.integer("cycle_index").notNullable();
+            table.integer("total_cycles").notNullable().defaultTo(1);
+            table.integer("engineer_id").notNullable();
+            table.string("engineer_name").notNullable();
+            table.string("status").notNullable(); // "ok" | "issue"
+            table.text("note");
+            table.timestamp("created_at").defaultTo(targetDb.fn.now());
+        });
+    }
 };

@@ -18,6 +18,7 @@ import {
     createOrderCheck,
     getStatsHandler,
 } from "../controllers/completionController";
+import { verifyQcPin, createOrderQcCheck } from "../controllers/qualityControlController";
 
 const router = Router();
 
@@ -34,6 +35,9 @@ router.get("/completion-queue", getCompletionQueueHandler);
 router.get("/stats", getStatsHandler);
 router.post("/print-prep-label", createPrepLabel);
 router.post("/order-check", createOrderCheck);
+// Quality-control sign-off — the engineer's PIN travels in X-QC-Pin.
+router.post("/qc-check/verify", verifyQcPin);
+router.post("/order-qc-check", createOrderQcCheck);
 router.post("/save-edited", saveEdited);
 router.get("/documents/:id/render", renderDocument);
 

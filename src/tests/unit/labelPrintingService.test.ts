@@ -101,6 +101,7 @@ import {
     resolveTypeFilter,
     resolveWorkplacePrinter,
     selectMotorBatchRows,
+    parseTmpContent,
     LabelRow,
 } from "../../services/labelPrintingService";
 import { getDb } from "../../config/database";
@@ -729,5 +730,32 @@ describe("selectRowsForCycle — single-cycle order", () => {
                 .join("\n"),
         );
         expect(selectRowsForCycle(rows, 1, 1)).toHaveLength(5);
+    });
+});
+
+describe("parseTmpContent — QC requirement (00000040)", () => {
+    // Same shape as a real TMP file line:
+    // 740|00000040|Speciální technické požadavky |       n|Ne
+    const tmp = (qc10: string, qc20: string) =>
+        [
+            "pozice|010",
+            "992|06210610|Vedeni pro stitky             |      HL|High lift",
+            `740|00000040|Specialni technicke pozadavky |       ${qc10}|x`,
+            "pozice|020",
+            "992|06210610|Vedeni pro stitky             |      VL|Vertical lift",
+            `740|00000040|Specialni technicke pozadavky |       ${qc20}|x`,
+        ].join("\n");
+
+    it("reads j as required and n as not, per position section", () => {
+        expect(parseTmpContent(tmp("j", "n"), "10").qcRequired).toBe(true);
+        expect(parseTmpContent(tmp("j", "n"), "20").qcRequired).toBe(false);
+    });
+
+    it("is case-insensitive", () => {
+        expect(parseTmpContent(tmp("J", "n"), "10").qcRequired).toBe(true);
+    });
+
+    it("is null when the position has no 00000040 line", () => {
+        expect(parseTmpContent("pozice|010\n992|06210610|x|HL|y", "10").qcRequired).toBeNull();
     });
 });

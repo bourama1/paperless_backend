@@ -1,5 +1,8 @@
 jest.mock("../../config/database");
 jest.mock("../../services/notificationService");
+jest.mock("../../services/qcRequirementService", () => ({
+    getQcRequiredForPositions: jest.fn().mockResolvedValue(new Map()),
+}));
 
 jest.mock("fs", () => {
     const actual = jest.requireActual("fs");
@@ -27,6 +30,7 @@ import { Request, Response } from "express";
 import fs from "fs";
 import { convertToPdfA, PdfaConversionError } from "../../services/pdfaService";
 import { thenable } from "../helpers/thenable";
+import { getQcRequiredForPositions } from "../../services/qcRequirementService";
 
 describe("Files Controller", () => {
     let mockRequest: Partial<Request>;
@@ -213,6 +217,9 @@ describe("Files Controller", () => {
                         checked_cycles: 0,
                         total_cycles: 1,
                         unchecked_cycles: [1],
+                        qc_required: null,
+                        qc_checked: false,
+                        qc_checked_cycles: 0,
                     },
                     {
                         document_id: 2,
@@ -232,6 +239,9 @@ describe("Files Controller", () => {
                         checked_cycles: 0,
                         total_cycles: 1,
                         unchecked_cycles: [1],
+                        qc_required: null,
+                        qc_checked: false,
+                        qc_checked_cycles: 0,
                     },
                 ],
             });
@@ -739,6 +749,81 @@ describe("Files Controller", () => {
                 // Cycles 3 and 4 haven't finished yet — they must not show
                 // up as needing a check.
                 unchecked_cycles: [1, 2],
+            });
+        });
+
+        it("qc=true keeps only QC-required positions without a full QC sign-off yet", async () => {
+            mockRequest = { query: { qc: "true" } };
+
+            // P1: QC required, not signed off -> kept. P2: QC required and
+            // signed off by a quality engineer -> dropped. P3: no QC needed
+            // -> dropped. P4: not resolved yet (absent from the map) ->
+            // dropped. P1's STANDARD check doesn't count toward QC.
+            const mockOclRows = ["P1", "P2", "P3", "P4"].map((pn) => ({
+                project_number: pn,
+                position: "10",
+                workstation: "Hardware",
+                sales_order: `SO-${pn}`,
+                latest_status: "complete",
+            }));
+            (getQcRequiredForPositions as jest.Mock).mockResolvedValueOnce(
+                new Map([
+                    ["P1||10", true],
+                    ["P2||10", true],
+                    ["P3||10", false],
+                ]),
+            );
+
+            const db = jest.fn((table: string) => {
+                if (table === "subquery") return chainable(mockOclRows);
+                if (table === "order_completion_log") {
+                    return chainable(
+                        ["P1", "P2", "P3", "P4"].map((pn) => ({
+                            project_number: pn,
+                            position: "10",
+                            workstation: "Hardware",
+                            cycle_index: 1,
+                            max_total_cycles: 1,
+                        })),
+                    );
+                }
+                if (table === "order_cycle_checks") {
+                    return chainable([
+                        {
+                            project_number: "P1",
+                            position: "10",
+                            workstation: "Hardware",
+                            cycle_index: 1,
+                            status: "ok",
+                            created_at: "2026-09-23T09:00:00Z",
+                        },
+                    ]);
+                }
+                if (table === "order_qc_checks") {
+                    return chainable([
+                        {
+                            project_number: "P2",
+                            position: "10",
+                            workstation: "Hardware",
+                            cycle_index: 1,
+                            status: "ok",
+                            engineer_name: "Eva Kvalitní",
+                            created_at: "2026-09-23T10:00:00Z",
+                        },
+                    ]);
+                }
+                return chainable([]);
+            });
+            (getDb as jest.Mock).mockResolvedValue(db);
+
+            await getDocumentsOverview(mockRequest as Request, mockResponse as Response);
+
+            const result = mockJson.mock.calls[0][0];
+            expect(result.items.map((i: any) => i.project_number)).toEqual(["P1"]);
+            expect(result.items[0]).toMatchObject({
+                qc_required: true,
+                checked: true, // standard check done...
+                qc_checked: false, // ...but the QC sign-off isn't
             });
         });
     });

@@ -4,6 +4,7 @@ import path from "path";
 import fs from "fs";
 import { convertToPdfA, PdfaConversionError } from "../services/pdfaService";
 import { resolvePbomTypeForWorkplace } from "../config/documentTypes";
+import { getQcRequiredForPositions } from "../services/qcRequirementService";
 
 /**
  * Batch-resolves check status for a set of (project_number, position)
@@ -36,13 +37,40 @@ interface CycleCheckDetail {
     checkedAt: string | null;
 }
 
+// A quality engineer's sign-off on one cycle (order_qc_checks) — separate
+// from, and in addition to, the standard check above.
+interface QcCycleDetail {
+    cycleIndex: number;
+    checked: boolean; // latest QC row for this cycle is "ok"
+    status: "ok" | "issue" | null;
+    engineerName: string | null;
+    note: string | null;
+    checkedAt: string | null;
+}
+
+interface QcCheckStatus {
+    checked: boolean;
+    checkedCycles: number;
+    uncheckedCycles: number[];
+    cycles: QcCycleDetail[];
+}
+
 interface PositionCheckStatus {
     totalCycles: number;
     checkedCycles: number;
     checked: boolean;
     uncheckedCycles: number[];
     cycles: CycleCheckDetail[];
+    qc: QcCheckStatus;
 }
+
+// No position on record at all — one implicit cycle, nothing checked.
+const EMPTY_QC_STATUS: QcCheckStatus = {
+    checked: false,
+    checkedCycles: 0,
+    uncheckedCycles: [],
+    cycles: [],
+};
 
 /**
  * Batch-resolves per-cycle QC status for a set of (project_number,
@@ -99,7 +127,7 @@ async function getCheckStatusForPositions(
     const posPairs = Array.from(workstationsByPosKey.keys()).map((k) => k.split("||"));
     const completionTriples = positions.map((p) => [p.project_number, p.position, p.workstation]);
 
-    const [completionRows, finishedCycleRows, prepRows, planRows, checkRows] = await Promise.all([
+    const [completionRows, finishedCycleRows, prepRows, planRows, checkRows, qcCheckRows] = await Promise.all([
         db("order_completion_log")
             .select("project_number", "position", "workstation")
             .max("total_cycles as max_total_cycles")
@@ -129,6 +157,11 @@ async function getCheckStatusForPositions(
         // that's simpler and more portable across DBs than a window
         // function here.
         db("order_cycle_checks")
+            .whereIn(["project_number", "position"], posPairs)
+            .orderBy("created_at", "desc"),
+        // Quality-control sign-offs, newest first — reduced to "latest per
+        // cycle" in JS below, same as checkRows. Always has a workstation.
+        db("order_qc_checks")
             .whereIn(["project_number", "position"], posPairs)
             .orderBy("created_at", "desc"),
     ]);
@@ -189,10 +222,22 @@ async function getCheckStatusForPositions(
         }
     }
 
+    const latestQcByKeyCycle = new Map<string, Map<number, any>>();
+    for (const row of (qcCheckRows ?? []) as any[]) {
+        const k = key(row.project_number, row.position, row.workstation);
+        let byCycle = latestQcByKeyCycle.get(k);
+        if (!byCycle) {
+            byCycle = new Map<number, any>();
+            latestQcByKeyCycle.set(k, byCycle);
+        }
+        if (!byCycle.has(row.cycle_index)) byCycle.set(row.cycle_index, row);
+    }
+
     for (const p of positions) {
         const k = key(p.project_number, p.position, p.workstation);
         const totalCycles = totalByKey.get(k) ?? 1;
         const byCycle = latestByKeyCycle.get(k);
+        const qcByCycle = latestQcByKeyCycle.get(k);
 
         // Only cycles that actually reached the kiosk (order_completion_log)
         // are checkable — a cycle within 1..totalCycles that hasn't
@@ -222,12 +267,33 @@ async function getCheckStatusForPositions(
             .filter((c) => !c.checked)
             .map((c) => c.cycleIndex);
 
+        // Same rules for the QC sign-off: only finished cycles, and done
+        // only once every cycle of the order has an "ok".
+        const qcCycles: QcCycleDetail[] = finishedCycleIndexes.map((cycleIndex) => {
+            const row = qcByCycle?.get(cycleIndex);
+            return {
+                cycleIndex,
+                checked: row?.status === "ok",
+                status: row?.status ?? null,
+                engineerName: row?.engineer_name ?? null,
+                note: row?.note ?? null,
+                checkedAt: row?.created_at ?? null,
+            };
+        });
+        const qcCheckedCycles = qcCycles.filter((c) => c.checked).length;
+
         result.set(k, {
             totalCycles,
             checkedCycles,
             checked: totalCycles > 0 && checkedCycles >= totalCycles,
             uncheckedCycles,
             cycles,
+            qc: {
+                checked: totalCycles > 0 && qcCheckedCycles >= totalCycles,
+                checkedCycles: qcCheckedCycles,
+                uncheckedCycles: qcCycles.filter((c) => !c.checked).map((c) => c.cycleIndex),
+                cycles: qcCycles,
+            },
         });
     }
 
@@ -309,11 +375,31 @@ export const getDocumentById = async (req: Request, res: Response) => {
                     checkedAt: null,
                 },
             ],
+            qc: EMPTY_QC_STATUS,
         };
+
+        // Only offered once the order is actually finished — before that
+        // there's nothing to sign off. sales_order comes from the
+        // completion row (documents rows don't carry it).
+        const qcRequiredMap = latestCompletion
+            ? await getQcRequiredForPositions(db, [
+                  {
+                      project_number: doc.project_number,
+                      position: doc.position,
+                      sales_order: latestCompletion.sales_order ?? null,
+                  },
+              ])
+            : new Map<string, boolean>();
 
         res.json({
             ...doc,
             status: latestCompletion?.status || null,
+            // Needs a quality-control sign-off per its TMP file; null while
+            // not resolved yet. See qcRequirementService.
+            qc_required: qcRequiredMap.get(`${doc.project_number}||${doc.position}`) ?? null,
+            qc_checked: checkStatus.qc.checked,
+            qc_checked_cycles: checkStatus.qc.checkedCycles,
+            qc_cycles: checkStatus.qc.cycles,
             revisioned: !!hasEditedRevision,
             checked: checkStatus.checked,
             checked_cycles: checkStatus.checkedCycles,
@@ -374,6 +460,9 @@ export const getDocumentById = async (req: Request, res: Response) => {
  *   status=complete,missing_product   comma-separated, OR'd together.
  *   revisioned=true                   only documents with an edited revision
  *   unchecked=true                    only documents not yet fully checked
+ *   qc=true                           only positions that need a quality
+ *                                     check (TMP 00000040 = "j") and
+ *                                     aren't fully QC-signed-off yet
  */
 export const getDocumentsOverview = async (req: Request, res: Response) => {
     try {
@@ -386,6 +475,7 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
             .filter(Boolean);
         const revisionedOnly = req.query.revisioned === "true";
         const uncheckedOnly = req.query.unchecked === "true";
+        const qcOnly = req.query.qc === "true";
 
         // Most recent order_completion_log row per projectNumber/position/
         // workstation — grouping by workstation too, not just
@@ -492,6 +582,14 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
             db,
             distinctPositionWorkstations,
         );
+        const qcRequiredByPosition = await getQcRequiredForPositions(
+            db,
+            rows.map((r: any) => ({
+                project_number: r.project_number,
+                position: r.position,
+                sales_order: r.sales_order ?? null,
+            })),
+        );
 
         const revisionsByDoc = new Map<number, any[]>();
         for (const r of revisionRows) {
@@ -522,6 +620,7 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                 checkedCycles: 0,
                 checked: false,
                 uncheckedCycles: [1],
+                qc: EMPTY_QC_STATUS,
             };
             return {
                 document_id: doc?.id ?? null,
@@ -545,6 +644,15 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
                 // verified — lets the overview show exactly what's left
                 // per position, not just a count.
                 unchecked_cycles: check.uncheckedCycles,
+                // Needs a quality-control check per its TMP file (00000040
+                // = "j"); null while not resolved yet (see
+                // qcRequirementService — filled in the background).
+                qc_required:
+                    qcRequiredByPosition.get(`${row.project_number}||${row.position}`) ?? null,
+                // The quality engineer's per-cycle sign-off (order_qc_checks)
+                // — separate from checked/checked_cycles above.
+                qc_checked: check.qc.checked,
+                qc_checked_cycles: check.qc.checkedCycles,
             };
         });
 
@@ -553,6 +661,9 @@ export const getDocumentsOverview = async (req: Request, res: Response) => {
         }
         if (uncheckedOnly) {
             items = items.filter((i) => !i.checked);
+        }
+        if (qcOnly) {
+            items = items.filter((i) => i.qc_required === true && !i.qc_checked);
         }
 
         res.json({ items });

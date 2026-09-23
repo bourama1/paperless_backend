@@ -7,6 +7,13 @@ import {
     hideEmployee,
     restoreEmployee,
 } from "../controllers/completionController";
+import {
+    getQualityEngineers,
+    postQualityEngineer,
+    putQualityEngineer,
+    hideQualityEngineer,
+    restoreQualityEngineer,
+} from "../controllers/qualityControlController";
 import { adminPinAuth } from "../middleware/apiKeyAuth";
 
 const router = Router();
@@ -23,5 +30,14 @@ router.post("/admin", adminPinAuth, createEmployee);
 router.put("/admin/:id", adminPinAuth, updateEmployee);
 router.post("/admin/:id/hide", adminPinAuth, hideEmployee);
 router.post("/admin/:id/restore", adminPinAuth, restoreEmployee);
+
+// Quality engineers — separate people from employees, each with their own
+// QC PIN (see qualityControlService). No clash with the "/admin/:id..."
+// routes above — these always have a different number of path segments.
+router.get("/admin/quality-engineers", adminPinAuth, getQualityEngineers);
+router.post("/admin/quality-engineers", adminPinAuth, postQualityEngineer);
+router.put("/admin/quality-engineers/:id", adminPinAuth, putQualityEngineer);
+router.post("/admin/quality-engineers/:id/hide", adminPinAuth, hideQualityEngineer);
+router.post("/admin/quality-engineers/:id/restore", adminPinAuth, restoreQualityEngineer);
 
 export default router;
