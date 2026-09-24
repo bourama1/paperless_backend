@@ -240,3 +240,45 @@ through the normal authenticated API calls, same as the native app.
   `.crt` file → "Install Certificate" → Local Machine → Trusted Root
   Certification Authorities. Worth pushing via Group Policy if there's an
   Active Directory domain, rather than doing it by hand per laptop.
+
+## 9. HTTPS through IIS (certificate with a non-exportable key)
+
+The backend can serve HTTPS itself (`SSL_PFX_PATH`), but that needs the
+certificate's private key as a `.pfx`. When the server's certificate
+(Sectigo, `tocz-app4.toors.cz`) sits in the Windows store with a
+**non-exportable** key, let IIS terminate HTTPS instead — IIS uses the key
+straight from the store — and forward to the backend on localhost.
+Clients keep the same address: `https://tocz-app4.toors.cz:5300`.
+
+1. **IIS** — Server Manager → Add Roles and Features → *Web Server (IIS)*,
+   including *Application Development → WebSocket Protocol*.
+2. Install Microsoft's **URL Rewrite 2.1** and **Application Request
+   Routing 3.0**.
+3. IIS Manager → server node → *Application Request Routing Cache* →
+   *Server Proxy Settings* → tick **Enable proxy** (leave "Preserve client
+   IP in X-Forwarded-For" on) → Apply.
+4. Create a folder, e.g. `C:\inetpub\paperless-proxy`, and copy
+   [`iis/web.config`](iis/web.config) into it.
+5. IIS Manager → Sites → *Add Website*: name `paperless`, physical path
+   that folder, binding **https**, port **5300**, host name
+   `tocz-app4.toors.cz`, SSL certificate: the Sectigo one.
+6. Backend `.env`, then restart the backend:
+   ```
+   PORT=5301
+   HOST=127.0.0.1
+   TRUST_PROXY=true
+   SSL_PFX_PATH=
+   ```
+   (`HOST=127.0.0.1` keeps the plain-HTTP port unreachable from the LAN;
+   `TRUST_PROXY` makes per-device logic like the QC PIN lockout see the
+   tablet's real IP instead of IIS's.)
+7. Check `https://tocz-app4.toors.cz:5300/health` from another PC — padlock,
+   no warning.
+
+Then switch every client at once — plain HTTP on 5300 is gone: the
+external production system's webhook
+(`https://tocz-app4.toors.cz:5300/workstations/order-update`), the tablets
+(APK built with `EXPO_PUBLIC_BACKEND_USE_HTTPS=true`), and browsers (open
+the hostname, not the IP — the certificate is for the name). When the
+certificate is renewed in the Windows store, re-select it in the site's
+https binding; nothing on the backend side changes.

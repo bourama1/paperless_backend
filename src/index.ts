@@ -150,6 +150,19 @@ io.use((socket, next) => {
 });
 
 const PORT = process.env.PORT || 3000;
+// Bind address. Empty = every interface (the default). Set to 127.0.0.1
+// when a reverse proxy on this same machine (e.g. IIS terminating HTTPS)
+// is the only thing that should reach the backend.
+const HOST = process.env.HOST || undefined;
+
+// Behind a reverse proxy on this machine, every request arrives from
+// 127.0.0.1 — trusting the loopback proxy makes req.ip the real client
+// from X-Forwarded-For instead, so per-client logic (the QC PIN lockout)
+// doesn't lump every tablet together. Only loopback is trusted, so a
+// client on the network can't spoof its IP with that header.
+if (process.env.TRUST_PROXY === "true") {
+    app.set("trust proxy", "loopback");
+}
 
 // Initialize Database
 const initDb = async () => {
@@ -274,8 +287,8 @@ io.on("connection", (socket) => {
 
 // Start server
 if (process.env.NODE_ENV !== "test") {
-    httpServer.listen(PORT, () => {
-        logger.info("SERVER", `Server running on port ${PORT}`);
+    httpServer.listen({ port: Number(PORT), host: HOST }, () => {
+        logger.info("SERVER", `Server running on ${HOST ?? "all interfaces"}, port ${PORT}`);
 
         // Start polling workstations
         const { pollWorkstations } = require("./services/workstationService");
