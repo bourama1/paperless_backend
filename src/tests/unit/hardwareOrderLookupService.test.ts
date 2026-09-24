@@ -9,6 +9,8 @@ jest.mock("fs", () => ({
     ...jest.requireActual("fs"),
     readdirSync: jest.fn(),
     readFileSync: jest.fn(),
+    // File creation times — per-file values set by the "newest wins" tests.
+    statSync: jest.fn().mockReturnValue({ birthtimeMs: 1, mtimeMs: 1 }),
     // No parts.xlsx in this test env — motorOrderService.getPartIds() then
     // fails open (every item treated as non-PTL), deterministically rather
     // than depending on whatever happens to be on the machine running this.
@@ -77,6 +79,62 @@ describe("resolveHardwareOrders", () => {
 
         const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
         expect(result.get("604594::10")?.productOrder).toBe("230018");
+    });
+
+    describe("more than one file for the same sales order + position", () => {
+        // Each file reads back as its own productOrder, so the result says
+        // which file was picked.
+        function mockFiles(files: Record<string, { birthtimeMs: number; mtimeMs?: number } | "unreadable">) {
+            (fs.statSync as jest.Mock).mockImplementation((p: string) => {
+                const entry = Object.entries(files).find(([name]) => p.endsWith(name))?.[1];
+                return entry === "unreadable" ? { birthtimeMs: 9e12, mtimeMs: 9e12 } : { mtimeMs: 0, ...entry };
+            });
+            (fs.readFileSync as jest.Mock).mockImplementation((p: string) => {
+                const [name, entry] = Object.entries(files).find(([n]) => p.endsWith(n))!;
+                if (entry === "unreadable") throw new Error("EBUSY");
+                return JSON.stringify({ ...SAMPLE_FILE, productOrder: name.split("_")[2] });
+            });
+        }
+        afterEach(() => (fs.statSync as jest.Mock).mockReturnValue({ birthtimeMs: 1, mtimeMs: 1 }));
+
+        it("takes the most recently created file, across folders — not the first or lowest number", () => {
+            mockDirs({
+                STANDARD: ["604594_10_230018_Hardware.json"],
+                SPARE: ["604594_10_229000_Hardware.json"],
+            });
+            mockFiles({
+                "604594_10_230018_Hardware.json": { birthtimeMs: 1000 },
+                "604594_10_229000_Hardware.json": { birthtimeMs: 2000 }, // newer, despite the lower number
+            });
+
+            const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
+
+            expect(result.get("604594::10")?.productOrder).toBe("229000");
+        });
+
+        it("falls back to the modified time when the filesystem reports no creation time", () => {
+            mockDirs({ STANDARD: ["604594_10_230018_Hardware.json", "604594_10_231000_Hardware.json"] });
+            mockFiles({
+                "604594_10_230018_Hardware.json": { birthtimeMs: 0, mtimeMs: 3000 },
+                "604594_10_231000_Hardware.json": { birthtimeMs: 0, mtimeMs: 1000 },
+            });
+
+            const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
+
+            expect(result.get("604594::10")?.productOrder).toBe("230018");
+        });
+
+        it("uses the next newest file when the newest one can't be read", () => {
+            mockDirs({ STANDARD: ["604594_10_231000_Hardware.json", "604594_10_230018_Hardware.json"] });
+            mockFiles({
+                "604594_10_231000_Hardware.json": "unreadable",
+                "604594_10_230018_Hardware.json": { birthtimeMs: 1000 },
+            });
+
+            const result = resolveHardwareOrders([{ salesOrder: "604594", position: "10" }]);
+
+            expect(result.get("604594::10")?.productOrder).toBe("230018");
+        });
     });
 
     it("returns an empty map when no file matches any requested pair", () => {

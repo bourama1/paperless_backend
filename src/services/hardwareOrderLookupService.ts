@@ -76,6 +76,12 @@ function parseHardwareType(id: string | undefined): string | null {
  * Returns a map keyed by "salesOrder::position". A pair with no matching
  * file (e.g. not produced/archived yet) is simply absent from the map —
  * that's expected, not an error.
+ *
+ * The same salesOrder/position can have more than one order file (e.g. a
+ * remake gets a new production order). The most recently CREATED file
+ * wins, across all three type folders — its production order, items and
+ * hardware type are used. If that file can't be read, the next newest is
+ * tried. More than one match is logged, listing every candidate.
  */
 export function resolveHardwareOrders(
     pairs: { salesOrder: string | null | undefined; position: string | null | undefined }[],
@@ -89,6 +95,8 @@ export function resolveHardwareOrders(
     }
     if (wanted.size === 0) return result;
 
+    // 1. Collect every matching file per pair, with its creation time.
+    const candidates = new Map<string, { filePath: string; productOrderFromName: string; createdMs: number }[]>();
     for (const typeDir of PRODUCED_TYPE_DIRS) {
         const dir = historyProducedDir(typeDir);
         let entries: string[];
@@ -104,40 +112,71 @@ export function resolveHardwareOrders(
             if (!match) continue;
             const [, salesOrder, position, productOrderFromName] = match;
             const key = `${salesOrder}::${position}`;
-            if (!wanted.has(key) || result.has(key)) continue;
+            if (!wanted.has(key)) continue;
 
+            const filePath = path.join(dir, filename);
+            let createdMs = 0;
             try {
-                // Strip a UTF-8 BOM if present — the production system
-                // writes these order files with one (see motorOrderService's
-                // readOrderFile, which reads the equivalent Motor files).
-                const raw = fs
-                    .readFileSync(path.join(dir, filename), "utf-8")
-                    .replace(/^﻿/, "");
-                const parsed = JSON.parse(raw) as {
-                    id?: string;
-                    productOrder?: string;
-                    items?: OrderFileItem[];
-                };
-                const items = parsed.items || [];
-                const partIds = getPartIds();
-                // Fail open the same way isNonPtlOrder does: an empty/missing
-                // parts.xlsx means nothing can be confirmed as a known PTL
-                // part, so every item is treated as needing manual prep
-                // rather than silently hiding the whole checklist.
-                const nonPtlItems =
-                    partIds.size === 0 ?
-                        items
-                    :   items.filter((item) => !isKnownPtlPart(partIds, item.itemID));
-                result.set(key, {
-                    productOrder: parsed.productOrder || productOrderFromName!,
-                    hardwareType: parseHardwareType(parsed.id),
-                    nonPtlItems,
-                });
+                const stat = fs.statSync(filePath);
+                // birthtime is the real creation time on Windows/NTFS; some
+                // filesystems don't report one (0), so fall back to mtime.
+                createdMs = stat.birthtimeMs || stat.mtimeMs;
             } catch (err: any) {
-                console.error(`[HARDWARE] Could not read/parse ${filename}: ${err.message}`);
+                console.warn(`[HARDWARE] Could not stat ${filePath}: ${err.message}`);
+            }
+            const list = candidates.get(key) ?? [];
+            list.push({ filePath, productOrderFromName: productOrderFromName!, createdMs });
+            candidates.set(key, list);
+        }
+    }
+
+    // 2. Per pair, take the newest file that can actually be read.
+    for (const [key, list] of candidates) {
+        list.sort((a, b) => b.createdMs - a.createdMs);
+        if (list.length > 1) {
+            console.warn(
+                `[HARDWARE] ${list.length} order files for ${key} — using the newest: ` +
+                    list.map((c) => `${path.basename(c.filePath)} (${new Date(c.createdMs).toISOString()})`).join(", "),
+            );
+        }
+        for (const candidate of list) {
+            const info = readHardwareOrderFile(candidate.filePath, candidate.productOrderFromName);
+            if (info) {
+                result.set(key, info);
+                break;
             }
         }
     }
 
     return result;
+}
+
+function readHardwareOrderFile(filePath: string, productOrderFromName: string): HardwareOrderInfo | null {
+    try {
+        // Strip a UTF-8 BOM if present — the production system writes these
+        // order files with one (see motorOrderService's readOrderFile, which
+        // reads the equivalent Motor files).
+        const raw = fs.readFileSync(filePath, "utf-8").replace(/^﻿/, "");
+        const parsed = JSON.parse(raw) as {
+            id?: string;
+            productOrder?: string;
+            items?: OrderFileItem[];
+        };
+        const items = parsed.items || [];
+        const partIds = getPartIds();
+        // Fail open the same way isNonPtlOrder does: an empty/missing
+        // parts.xlsx means nothing can be confirmed as a known PTL part, so
+        // every item is treated as needing manual prep rather than silently
+        // hiding the whole checklist.
+        const nonPtlItems =
+            partIds.size === 0 ? items : items.filter((item) => !isKnownPtlPart(partIds, item.itemID));
+        return {
+            productOrder: parsed.productOrder || productOrderFromName,
+            hardwareType: parseHardwareType(parsed.id),
+            nonPtlItems,
+        };
+    } catch (err: any) {
+        console.error(`[HARDWARE] Could not read/parse ${path.basename(filePath)}: ${err.message}`);
+        return null;
+    }
 }
